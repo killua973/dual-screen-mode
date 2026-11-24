@@ -171,18 +171,31 @@ def _scan_strings(obj, out):
             _scan_strings(item, out)
 
 
-def virtual_connectors(state):
+def all_connectors(state):
     found = []
     for entry in state["monitors"]:
         connector = connector_of(entry)
-        if connector and connector.startswith(VIRTUAL_PREFIX) and connector not in found:
+        if connector and connector not in found:
+            found.append(connector)
+    return found
+
+
+def looks_virtual(name):
+    lowered = name.lower()
+    return lowered.startswith(VIRTUAL_PREFIX.lower()) or "virtual" in lowered or "headless" in lowered
+
+
+def virtual_connectors(state):
+    found = []
+    for connector in all_connectors(state):
+        if looks_virtual(connector) and connector not in found:
             found.append(connector)
     if not found:
         # Shape fallback: scan the whole reply for virtual connector names.
         strings = []
         _scan_strings(state["raw"], strings)
         for item in strings:
-            if item.startswith(VIRTUAL_PREFIX) and item not in found:
+            if looks_virtual(item) and item not in found:
                 found.append(item)
     return found
 
@@ -389,9 +402,12 @@ def cmd_virtual_connector(args):
             saved = handle.read().strip()
     except OSError:
         saved = ""
-    if saved and saved in virtuals:
-        print(saved)
-        return 0
+    if saved:
+        strings = []
+        _scan_strings(state["raw"], strings)
+        if saved in strings or saved in all_connectors(state):
+            print(saved)
+            return 0
     if virtuals:
         print(virtuals[0])
     return 0
@@ -446,9 +462,10 @@ def cmd_run(args):
     connector_file = args[args.index("--connector-file") + 1]
 
     state = get_state()
-    existing = set(virtual_connectors(state))
-    if existing:
-        print("a virtual monitor already exists: %s" % ", ".join(sorted(existing)), file=sys.stderr)
+    existing = set(all_connectors(state))
+    existing_virtuals = set(virtual_connectors(state))
+    if existing_virtuals:
+        print("a virtual monitor already exists: %s" % ", ".join(sorted(existing_virtuals)), file=sys.stderr)
         return 4
 
     session_path = busctl_call_json(
@@ -481,9 +498,11 @@ def cmd_run(args):
         except RuntimeError:
             time.sleep(0.5)
             continue
-        new_virtuals = [item for item in virtual_connectors(state) if item not in existing]
-        if new_virtuals:
-            connector = new_virtuals[0]
+        new_connectors = [item for item in all_connectors(state) if item not in existing]
+        new_virtuals = [item for item in new_connectors if looks_virtual(item)]
+        candidates = new_virtuals or new_connectors
+        if candidates:
+            connector = candidates[0]
             break
         if consumer.poll() is not None:
             break
@@ -517,7 +536,9 @@ def cmd_run(args):
             state = get_state()
         except RuntimeError:
             continue
-        if connector not in virtual_connectors(state):
+        strings = []
+        _scan_strings(state["raw"], strings)
+        if connector not in all_connectors(state) and connector not in strings:
             exit_code = 1
             break
 
