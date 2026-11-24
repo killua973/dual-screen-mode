@@ -755,7 +755,12 @@ exit "$status"
             self.after(500, lambda: self.show_page(7))
         else:
             self.install_failed = True
-            self.progress_detail_var.set("Setup stopped before it finished. Nothing else will run automatically.")
+            detail = "Setup stopped before it finished. Nothing else will run automatically."
+            for line in reversed(self.output_lines):
+                if line.strip():
+                    detail += "\nLast message: " + line.strip()[-300:]
+                    break
+            self.progress_detail_var.set(detail)
             self.next_button.pack(side="left", padx=5)
             self.next_button.configure(text="Close", command=self.destroy)
             self.footer_note.configure(text="Check the last message in the setup output.")
