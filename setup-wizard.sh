@@ -6,6 +6,40 @@ umask 077
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 APP_ID="dev.lizardbyte.app.Sunshine"
 VIRTUAL_NAME="DualScreen"
+
+detect_desktop() {
+    local desktop="${XDG_CURRENT_DESKTOP:-${XDG_SESSION_DESKTOP:-}}"
+    case ",${desktop}," in
+        *gnome*|*GNOME*|*ubuntu*|*Ubuntu*) printf 'gnome\n' ;;
+        *) printf 'kde\n' ;;
+    esac
+}
+DSM_DESKTOP="${DUAL_SCREEN_DESKTOP:-$(detect_desktop)}"
+case "$DSM_DESKTOP" in
+    gnome|kde) ;;
+    *) DSM_DESKTOP="kde" ;;
+esac
+
+refresh_sunshine_conf_path() {
+    if [[ -f "$STATE_DIR/sunshine-mode" ]]; then
+        if [[ "$(cat "$STATE_DIR/sunshine-mode" 2>/dev/null)" == "native" ]]; then
+            SUNSHINE_MODE="native"
+            SUNSHINE_CONF="$HOME/.config/sunshine/sunshine.conf"
+            return 0
+        fi
+    fi
+    if command -v flatpak >/dev/null 2>&1 && flatpak info "$APP_ID" >/dev/null 2>&1; then
+        SUNSHINE_MODE="flatpak"
+        SUNSHINE_CONF="$HOME/.var/app/$APP_ID/config/sunshine/sunshine.conf"
+    elif command -v sunshine >/dev/null 2>&1; then
+        SUNSHINE_MODE="native"
+        SUNSHINE_CONF="$HOME/.config/sunshine/sunshine.conf"
+    else
+        SUNSHINE_MODE="flatpak"
+        SUNSHINE_CONF="$HOME/.var/app/$APP_ID/config/sunshine/sunshine.conf"
+    fi
+}
+SUNSHINE_MODE="flatpak"
 SUNSHINE_CONF="$HOME/.var/app/$APP_ID/config/sunshine/sunshine.conf"
 ENV_DIR="$HOME/.config/environment.d"
 ENV_FILE="$ENV_DIR/dual-screen-mode.conf"
@@ -41,6 +75,7 @@ MOTION_DISCOVERY_DEST="$UNINSTALL_APP_DIR/motion_discovery.py"
 DISPLAY_LAYOUT_DEST="$UNINSTALL_APP_DIR/display_layout.py"
 CEMU_PROFILE_DEST="$UNINSTALL_APP_DIR/cemu_profile.py"
 MOTION_PROBE_DIR_DEST="$UNINSTALL_APP_DIR/motion_probe"
+GNOME_VMON_DEST="$UNINSTALL_APP_DIR/gnome_vmon.py"
 ICON_DEST="$HOME/.local/share/icons/dual-screen-mode.png"
 SETTINGS_ICON_DEST="$HOME/.local/share/icons/dual-screen-mode-settings.png"
 BUNDLED_ICON="$PROJECT_DIR/assets/dual-screen-mode.png"
@@ -321,7 +356,18 @@ welcome() {
 }
 
 print_audit() {
-    cat <<'EOF'
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        cat <<'EOF'
+Dual Screen Mode trust/audit summary (GNOME/Nobara)
+
+Changes it may make:
+  - Install GNOME virtual-display dependencies (pipewire-gstreamer, libinput-utils, python3-gobject) through dnf, only after confirmation.
+  - Install Sunshine from the lizardbyte COPR with dnf, or the official Flathub app ID dev.lizardbyte.app.Sunshine, only after confirmation.
+  - Update Sunshine's local capture/output settings for XDG portal capture.
+  - Install a toggle that creates a Mutter virtual monitor, maps Sunshine's virtual touchscreen to it through the GNOME touchscreen settings while the mode is active, then restores the previous mapping when it is turned off.
+EOF
+    else
+        cat <<'EOF'
 Dual Screen Mode trust/audit summary
 
 Changes it may make:
@@ -330,6 +376,10 @@ Changes it may make:
   - Add a user-level KWin screencast permission setting.
   - Update Sunshine's local capture/output settings.
   - Install a toggle that maps Sunshine's virtual touchscreen to the virtual display through KWin while the mode is active, then restores the previous mapping when it is turned off.
+EOF
+    fi
+    cat <<'EOF'
+  - Save a selected display size and audio preference in a user config file.
   - Save a selected display size and audio preference in a user config file.
   - Enable a small DSU motion-health connection by default while the mode is active. If the Deck address is missing, Dual Screen Mode and Settings check only the local network and save a discovered address; Find Deck and manual entry remain available as fallbacks.
   - Audio is explicit: Host sets Sunshine audio streaming off and leaves host outputs alone. Handheld sets it on and mutes the current default output. Both is work in progress and currently uses the Handheld behavior. Before this, Dual Screen Mode saves Sunshine's current audio-stream setting and, when available, the current default output's volume and mute state. Those saved values are restored when the mode turns off.
@@ -346,10 +396,18 @@ Safety controls:
   - --dry-run previews the host-specific work without modifying it.
   - Existing files are backed up before replacement.
   - System changes require explicit confirmation.
-  - If krfb is missing, the graphical wizard opens a visible Konsole package step and waits for the user to check again.
-  - The KWin permission tradeoff is shown before it is enabled.
   - Uninstall removes only files and settings owned by Dual Screen Mode.
 EOF
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        cat <<'EOF'
+  - If GNOME dependencies are missing, the graphical wizard opens a visible terminal package step and waits for the user to check again.
+EOF
+    else
+        cat <<'EOF'
+  - If krfb is missing, the graphical wizard opens a visible Konsole package step and waits for the user to check again.
+  - The KWin permission tradeoff is shown before it is enabled.
+EOF
+    fi
 }
 
 fail() {
@@ -406,7 +464,18 @@ check_host() {
     note "Desktop session: $desktop / $session"
 
     if [[ "$session" != "wayland" ]]; then
-        fail "Dual Screen Mode needs a KDE Wayland session. Current session: $session"
+        fail "Dual Screen Mode needs a Wayland session. Current session: $session"
+    fi
+
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        if ! have busctl || ! have python3; then
+            fail "busctl and python3 are required on a GNOME Wayland session."
+        fi
+        if ! python3 "$PROJECT_DIR/gnome_vmon.py" status >/dev/null 2>&1; then
+            fail "GNOME's Mutter display API is not reachable. This needs GNOME 46+ on Wayland with the experimental display API enabled."
+        fi
+        note "GNOME Mutter virtual-monitor support is ready."
+        return 0
     fi
 
     if [[ "$desktop" != *KDE* && "$desktop" != *Plasma* ]]; then
@@ -420,15 +489,24 @@ check_host() {
 
 system_check() {
     check_host
-    if have krfb-virtualmonitor; then
-        note "krfb-virtualmonitor is ready."
+    refresh_sunshine_conf_path
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        if have gst-launch-1.0 && gst-inspect-1.0 pipewiresrc >/dev/null 2>&1; then
+            note "GNOME virtual-display dependencies are ready."
+        else
+            note "GNOME virtual-display dependencies are missing. The setup will offer to install them with dnf."
+        fi
     else
-        note "krfb-virtualmonitor is missing. The setup will offer to install krfb."
+        if have krfb-virtualmonitor; then
+            note "krfb-virtualmonitor is ready."
+        else
+            note "krfb-virtualmonitor is missing. The setup will offer to install krfb."
+        fi
     fi
-    if have flatpak && flatpak info "$APP_ID" >/dev/null 2>&1; then
+    if [[ "$SUNSHINE_MODE" == "native" ]] || { have flatpak && flatpak info "$APP_ID" >/dev/null 2>&1; }; then
         note "Sunshine is ready."
     else
-        note "Sunshine is missing or unavailable. The setup will offer the official Flatpak."
+        note "Sunshine is missing or unavailable. The setup will offer to install it."
     fi
 }
 
@@ -486,14 +564,84 @@ install_krfb() {
     have krfb-virtualmonitor || fail "krfb installed without krfb-virtualmonitor being available."
 }
 
-install_sunshine() {
-    if ! have flatpak; then
-        fail "Flatpak is required for the Sunshine host in v1."
+install_gnome_deps() {
+    # GNOME creates the virtual monitor through Mutter, so no KDE package is
+    # needed. The helper only needs a PipeWire consumer element and input
+    # inspection tools, all available from Fedora/Nobara repositories.
+    if have gst-launch-1.0 && gst-inspect-1.0 pipewiresrc >/dev/null 2>&1 &&
+        have python3 && have libinput && have gsettings; then
+        note "GNOME virtual-display dependencies are already installed."
+        return 0
     fi
 
-    if flatpak info "$APP_ID" >/dev/null 2>&1; then
+    if ! ui_question "GNOME virtual-display dependencies are missing. Install them with dnf (pipewire-gstreamer, libinput-utils, python3-gobject)?"; then
+        fail "The GNOME virtual-display dependencies are required to create the second screen."
+    fi
+
+    if (( DRY_RUN )); then
+        note "Would install the GNOME virtual-display dependencies with dnf."
+        return 0
+    fi
+
+    if ! have dnf; then
+        fail "This setup expects dnf for a Fedora/Nobara GNOME host."
+    fi
+    if ! have pkexec && ! have sudo; then
+        fail "A system administrator authorization tool is required to install packages."
+    fi
+
+    if ! run_as_root dnf install -y \
+        pipewire-gstreamer \
+        gstreamer1-plugins-base \
+        gstreamer1-plugins-good \
+        libinput-utils \
+        python3-gobject; then
+        fail "The GNOME dependency installation failed. No Dual Screen Mode files were installed."
+    fi
+    if ! gst-inspect-1.0 pipewiresrc >/dev/null 2>&1; then
+        run_as_root dnf install -y gstreamer1-plugin-pipewire || true
+    fi
+    gst-inspect-1.0 pipewiresrc >/dev/null 2>&1 ||
+        fail "pipewiresrc is still unavailable after installation."
+}
+
+install_sunshine() {
+    refresh_sunshine_conf_path
+    if [[ "$SUNSHINE_MODE" == "native" ]]; then
         note "Sunshine is already installed."
+        mkdir -p "$STATE_DIR"
+        printf '%s\n' native > "$STATE_DIR/sunshine-mode"
+        return 0
+    fi
+
+    if have flatpak && flatpak info "$APP_ID" >/dev/null 2>&1; then
+        note "Sunshine is already installed."
+        mkdir -p "$STATE_DIR"
+        printf '%s\n' flatpak > "$STATE_DIR/sunshine-mode"
+    elif [[ "$DSM_DESKTOP" == "gnome" ]] && have dnf && ! have sunshine; then
+        if ! ui_question "Sunshine is missing. Install the LizardByte Sunshine package with dnf (lizardbyte COPR)?"; then
+            fail "Sunshine is required to stream the virtual display."
+        fi
+        if (( DRY_RUN )); then
+            note "Would enable the lizardbyte COPR and install Sunshine with dnf."
+        else
+            if ! run_as_root bash -c '
+                set -e
+                dnf install -y dnf-plugin-copr || true
+                dnf copr enable -y lizardbyte/stable
+                dnf install -y Sunshine
+            '; then
+                fail "The Sunshine installation failed."
+            fi
+        fi
+        have sunshine || fail "dnf finished but the sunshine binary is still unavailable."
+        mkdir -p "$STATE_DIR"
+        printf '%s\n' native > "$STATE_DIR/sunshine-mode"
+        refresh_sunshine_conf_path
     else
+        if ! have flatpak; then
+            fail "Flatpak is required for the Sunshine host on this desktop."
+        fi
         if ! ui_question "Sunshine is missing. Install the LizardByte Sunshine Flatpak from Flathub?"; then
             fail "Sunshine is required to stream the virtual display."
         fi
@@ -509,29 +657,38 @@ install_sunshine() {
                 fail "The Sunshine installation failed."
             fi
         fi
+        mkdir -p "$STATE_DIR"
+        printf '%s\n' flatpak > "$STATE_DIR/sunshine-mode"
+        refresh_sunshine_conf_path
     fi
 
-    if flatpak override --user --show "$APP_ID" 2>/dev/null |
-        grep -Fq 'KWIN_WAYLAND_NO_PERMISSION_CHECKS=1'; then
-        note "Sunshine's KWin permission override is already present."
-    elif (( DRY_RUN )); then
-        note "Would enable Sunshine's KWin permission override."
-    else
-        if (( ! PERMISSIONS_APPROVED )) && ! ui_question \
-            "Sunshine needs a user-level KWin screencast override for this capture method. Continue?"; then
-            fail "Sunshine's KWin permission override was not enabled."
+    if [[ "$SUNSHINE_MODE" == "flatpak" && "$DSM_DESKTOP" == "kde" ]]; then
+        if flatpak override --user --show "$APP_ID" 2>/dev/null |
+            grep -Fq 'KWIN_WAYLAND_NO_PERMISSION_CHECKS=1'; then
+            note "Sunshine's KWin permission override is already present."
+        elif (( DRY_RUN )); then
+            note "Would enable Sunshine's KWin permission override."
+        else
+            if (( ! PERMISSIONS_APPROVED )) && ! ui_question \
+                "Sunshine needs a user-level KWin screencast override for this capture method. Continue?"; then
+                fail "Sunshine's KWin permission override was not enabled."
+            fi
+            if ! flatpak override --user \
+                --env=KWIN_WAYLAND_NO_PERMISSION_CHECKS=1 \
+                "$APP_ID"; then
+                fail "Could not configure Sunshine's KWin permission override."
+            fi
+            mkdir -p "$STATE_DIR"
+            touch "$OWNED_OVERRIDE_MARKER"
         fi
-        if ! flatpak override --user \
-            --env=KWIN_WAYLAND_NO_PERMISSION_CHECKS=1 \
-            "$APP_ID"; then
-            fail "Could not configure Sunshine's KWin permission override."
-        fi
-        mkdir -p "$STATE_DIR"
-        touch "$OWNED_OVERRIDE_MARKER"
     fi
 }
 
 configure_environment() {
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        note "No KWin environment setting is needed on GNOME."
+        return 0
+    fi
     if grep -Fxq 'KWIN_WAYLAND_NO_PERMISSION_CHECKS=1' "$ENV_FILE" 2>/dev/null; then
         note "KWin screencast environment setting is already present."
         return 0
@@ -560,6 +717,35 @@ configure_environment() {
 }
 
 configure_sunshine() {
+    refresh_sunshine_conf_path
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        if grep -Eq "^[[:space:]]*capture[[:space:]]*=[[:space:]]*portal[[:space:]]*$" "$SUNSHINE_CONF" 2>/dev/null; then
+            note "Sunshine is already configured for GNOME portal capture."
+            return 0
+        fi
+
+        local original_capture original_output
+        original_capture="$(grep -m1 -E "^[[:space:]]*capture[[:space:]]*=" "$SUNSHINE_CONF" 2>/dev/null || true)"
+        original_output="$(grep -m1 -E "^[[:space:]]*output_name[[:space:]]*=" "$SUNSHINE_CONF" 2>/dev/null || true)"
+        backup_file "$SUNSHINE_CONF"
+        if (( DRY_RUN )); then
+            note "Would configure Sunshine for GNOME portal capture."
+            return 0
+        fi
+
+        mkdir -p "$(dirname "$SUNSHINE_CONF")" ||
+            fail "Could not create Sunshine's configuration directory."
+        touch "$SUNSHINE_CONF" ||
+            fail "Could not create Sunshine's configuration file."
+        set_config_key "$SUNSHINE_CONF" capture portal
+        mkdir -p "$STATE_DIR"
+        printf '%s\n' \
+            "capture_line=${original_capture:-__MISSING__}" \
+            "output_name_line=${original_output:-__MISSING__}" > "$OWNED_SUNSHINE_CONFIG_MARKER"
+        note "Sunshine is configured for GNOME portal capture."
+        return 0
+    fi
+
     if grep -Eq "^[[:space:]]*capture[[:space:]]*=[[:space:]]*kwin[[:space:]]*$" "$SUNSHINE_CONF" 2>/dev/null &&
         grep -Eq "^[[:space:]]*output_name[[:space:]]*=[[:space:]]*Virtual-${VIRTUAL_NAME}[[:space:]]*$" "$SUNSHINE_CONF" 2>/dev/null; then
         note "Sunshine is already configured for Virtual-${VIRTUAL_NAME}."
@@ -776,6 +962,7 @@ install_uninstaller() {
     backup_file "$MOTION_DISCOVERY_DEST"
     backup_file "$DISPLAY_LAYOUT_DEST"
     backup_file "$CEMU_PROFILE_DEST"
+    backup_file "$GNOME_VMON_DEST"
     backup_file "$MOTION_PROBE_DIR_DEST/dsu_motion_probe.py"
     backup_file "$MOTION_PROBE_DIR_DEST/__init__.py"
     if (( DRY_RUN )); then
@@ -796,6 +983,8 @@ install_uninstaller() {
         fail "Could not install the motion discovery helper."
     install -m 755 "$PROJECT_DIR/display_layout.py" "$DISPLAY_LAYOUT_DEST" ||
         fail "Could not install the display layout helper."
+    install -m 755 "$PROJECT_DIR/gnome_vmon.py" "$GNOME_VMON_DEST" ||
+        fail "Could not install the GNOME virtual monitor helper."
     install -m 755 "$PROJECT_DIR/cemu_profile.py" "$CEMU_PROFILE_DEST" ||
         fail "Could not install the Cemu profile helper."
     mkdir -p "$MOTION_PROBE_DIR_DEST"
@@ -888,11 +1077,20 @@ main() {
     progress_step 1 "Checking the host environment"
     check_host
     progress_step 2 "Checking the virtual-display component"
-    install_krfb
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        install_gnome_deps
+    else
+        install_krfb
+    fi
     progress_step 3 "Checking Sunshine"
     install_sunshine
-    progress_step 4 "Applying the KDE capture permission"
-    configure_environment
+    if [[ "$DSM_DESKTOP" == "kde" ]]; then
+        progress_step 4 "Applying the KDE capture permission"
+        configure_environment
+    else
+        progress_step 4 "Checking the GNOME capture permission"
+        note "GNOME uses the XDG portal; Sunshine asks once which screen to share."
+    fi
     progress_step 5 "Configuring Sunshine for the virtual display"
     configure_sunshine
     progress_step 6 "Saving display and audio choices"

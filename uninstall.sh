@@ -4,6 +4,33 @@ set -u
 umask 077
 
 APP_ID="dev.lizardbyte.app.Sunshine"
+
+detect_desktop() {
+    local desktop="${XDG_CURRENT_DESKTOP:-${XDG_SESSION_DESKTOP:-}}"
+    case ",${desktop}," in
+        *gnome*|*GNOME*|*ubuntu*|*Ubuntu*) printf 'gnome\n' ;;
+        *) printf 'kde\n' ;;
+    esac
+}
+DSM_DESKTOP="${DUAL_SCREEN_DESKTOP:-$(detect_desktop)}"
+case "$DSM_DESKTOP" in
+    gnome|kde) ;;
+    *) DSM_DESKTOP="kde" ;;
+esac
+
+refresh_sunshine_conf_path() {
+    if [[ -f "$STATE_DIR/sunshine-mode" ]]; then
+        if [[ "$(cat "$STATE_DIR/sunshine-mode" 2>/dev/null)" == "native" ]]; then
+            SUNSHINE_CONF="$HOME/.config/sunshine/sunshine.conf"
+            return 0
+        fi
+    fi
+    if command -v flatpak >/dev/null 2>&1 && flatpak info "$APP_ID" >/dev/null 2>&1; then
+        SUNSHINE_CONF="$HOME/.var/app/$APP_ID/config/sunshine/sunshine.conf"
+    else
+        SUNSHINE_CONF="$HOME/.config/sunshine/sunshine.conf"
+    fi
+}
 SUNSHINE_CONF="$HOME/.var/app/$APP_ID/config/sunshine/sunshine.conf"
 TOGGLE_DEST="$HOME/.local/bin/dual-screen-mode"
 desktop_dir() {
@@ -36,6 +63,7 @@ MOTION_MONITOR_DEST="$UNINSTALL_APP_DIR/motion_monitor.py"
 MOTION_DISCOVERY_DEST="$UNINSTALL_APP_DIR/motion_discovery.py"
 DISPLAY_LAYOUT_DEST="$UNINSTALL_APP_DIR/display_layout.py"
 CEMU_PROFILE_DEST="$UNINSTALL_APP_DIR/cemu_profile.py"
+GNOME_VMON_DEST="$UNINSTALL_APP_DIR/gnome_vmon.py"
 MOTION_PROBE_DIR_DEST="$UNINSTALL_APP_DIR/motion_probe"
 ICON_DEST="$HOME/.local/share/icons/dual-screen-mode.png"
 SETTINGS_ICON_DEST="$HOME/.local/share/icons/dual-screen-mode-settings.png"
@@ -57,6 +85,7 @@ DISCOVERY_PID_FILE="$RUNTIME_DIR/motion-discovery.pid"
 MOTION_PID_FILE="$RUNTIME_DIR/motion-monitor.pid"
 STATE_DIR="$HOME/.local/state/dual-screen-mode"
 VIRTUAL_NAME="DualScreen"
+VMON_CONNECTOR_FILE="$RUNTIME_DIR/vmonitor.connector"
 OWNED_ENV_MARKER="$STATE_DIR/owned-environment-setting"
 OWNED_OVERRIDE_MARKER="$STATE_DIR/owned-sunshine-override"
 OWNED_SUNSHINE_CONFIG_MARKER="$STATE_DIR/owned-sunshine-config"
@@ -109,6 +138,13 @@ vmonitor_pid_is_ours() {
     local pid="$1"
     [[ "$pid" =~ ^[0-9]+$ ]] || return 1
     [[ -r "/proc/$pid/cmdline" && -O "/proc/$pid" ]] || return 1
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
+            grep -Fq "gnome_vmon.py" || return 1
+        tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
+            grep -Fq -- "--runtime-dir $RUNTIME_DIR"
+        return
+    fi
     tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
         grep -Fq "krfb-virtualmonitor" || return 1
     tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
@@ -150,6 +186,11 @@ sunshine_pid_is_ours() {
         fi
     fi
 
+    if [[ -f "$STATE_DIR/sunshine-mode" ]] && [[ "$(cat "$STATE_DIR/sunshine-mode" 2>/dev/null)" == "native" ]]; then
+        tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
+            grep -Eq '(^|/| )sunshine( |$)' && return 0
+        return 1
+    fi
     tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
         grep -Fq "$APP_ID" && return 0
     grep -Fq "$APP_ID" "/proc/$pid/cgroup" 2>/dev/null
@@ -210,24 +251,38 @@ stop_motion_monitor() {
 restore_touch_mappings() {
     [[ -f "$TOUCH_MAPPING_FILE" ]] || return 0
 
-    local dbus_tool=""
-    if have qdbus6; then
-        dbus_tool="qdbus6"
-    elif have qdbus; then
-        dbus_tool="qdbus"
-    fi
-    if [[ -n "$dbus_tool" ]]; then
-        local device old_output
-        while IFS=$'\t' read -r device old_output; do
-            [[ -n "$device" ]] || continue
-            run_bounded 3 "$dbus_tool" \
-                org.kde.KWin \
-                "/org/kde/KWin/InputDevice/$device" \
-                org.freedesktop.DBus.Properties.Set \
-                org.kde.KWin.InputDevice \
-                outputName \
-                "$old_output" >/dev/null 2>&1 || true
-        done < "$TOUCH_MAPPING_FILE"
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        if have gsettings; then
+            local path old_output
+            while IFS=$'\t' read -r path old_output; do
+                [[ -n "$path" ]] || continue
+                if [[ -z "$old_output" || "$old_output" == "__MISSING__" ]]; then
+                    gsettings reset org.gnome.desktop.peripherals.touchscreen:"$path" output 2>/dev/null || true
+                else
+                    gsettings set org.gnome.desktop.peripherals.touchscreen:"$path" output "$old_output" 2>/dev/null || true
+                fi
+            done < "$TOUCH_MAPPING_FILE"
+        fi
+    else
+        local dbus_tool=""
+        if have qdbus6; then
+            dbus_tool="qdbus6"
+        elif have qdbus; then
+            dbus_tool="qdbus"
+        fi
+        if [[ -n "$dbus_tool" ]]; then
+            local device old_output
+            while IFS=$'\t' read -r device old_output; do
+                [[ -n "$device" ]] || continue
+                run_bounded 3 "$dbus_tool" \
+                    org.kde.KWin \
+                    "/org/kde/KWin/InputDevice/$device" \
+                    org.freedesktop.DBus.Properties.Set \
+                    org.kde.KWin.InputDevice \
+                    outputName \
+                    "$old_output" >/dev/null 2>&1 || true
+            done < "$TOUCH_MAPPING_FILE"
+        fi
     fi
     rm -f "$TOUCH_MAPPING_FILE" "$RUNTIME_DIR/touch-status" "$RUNTIME_DIR/touch-watcher.pid"
 }
@@ -292,6 +347,7 @@ restore_sunshine_config() {
 }
 
 stop_mode() {
+    refresh_sunshine_conf_path
     if [[ -f "$STARTING_FILE" && -x "$TOGGLE_DEST" ]]; then
         touch "$START_CANCEL_FILE"
         for _ in {1..60}; do
@@ -317,18 +373,28 @@ stop_mode() {
         local sunshine_pid
         sunshine_pid="$(cat "$SUNSHINE_PID_FILE" 2>/dev/null || true)"
         if [[ -f "$SUNSHINE_OWNED_FILE" ]] || sunshine_pid_is_ours "$sunshine_pid"; then
-            run_bounded 5 flatpak kill "$APP_ID" 2>/dev/null || true
+            if command -v flatpak >/dev/null 2>&1 && flatpak info "$APP_ID" >/dev/null 2>&1; then
+                run_bounded 5 flatpak kill "$APP_ID" 2>/dev/null || true
+            elif [[ "$sunshine_pid" =~ ^[0-9]+$ ]] && sunshine_pid_is_ours "$sunshine_pid"; then
+                terminate_process_tree "$sunshine_pid"
+            fi
         fi
     fi
     if [[ -f "$RUNTIME_DIR/vmonitor.pid" ]]; then
         local pid
         pid="$(cat "$RUNTIME_DIR/vmonitor.pid" 2>/dev/null || true)"
         stop_vmonitor_pid "$pid"
-    else
-        while IFS= read -r pid; do
-            stop_vmonitor_pid "$pid"
-        done < <(pgrep -u "$(id -u)" -f '(^|/)krfb-virtualmonitor([[:space:]]|$)' 2>/dev/null || true)
     fi
+    local vmon_pattern
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        vmon_pattern='gnome_vmon\.py.*--runtime-dir'
+    else
+        vmon_pattern='(^|/)krfb-virtualmonitor([[:space:]]|$)'
+    fi
+    while IFS= read -r pid; do
+        stop_vmonitor_pid "$pid"
+    done < <(pgrep -u "$(id -u)" -f "$vmon_pattern" 2>/dev/null || true)
+    rm -f "$VMON_CONNECTOR_FILE"
     restore_audio_state
     restore_sunshine_config
     rm -f "$RUNTIME_DIR/active" "$RUNTIME_DIR/stopping" "$STARTING_FILE" "$START_CANCEL_FILE" "$RUNTIME_DIR/vmonitor.pid" "$RUNTIME_DIR/sunshine.pid" "$SUNSHINE_START_FILE" "$SUNSHINE_INSTANCE_FILE" "$SUNSHINE_OWNED_FILE" "$SUNSHINE_PREEXISTING_FILE" "$SUNSHINE_SESSION_CONFIG_FILE" "$RUNTIME_DIR/motion-status" "$RUNTIME_DIR/motion-monitor.log" "$MOTION_PID_FILE" "$DISCOVERY_PID_FILE" "$TOUCH_WATCHER_PID_FILE"
@@ -348,13 +414,13 @@ if (( DRY_RUN )); then
         "Would remove the owned KWin environment setting" \
         "Would remove the owned Sunshine Flatpak override" \
         "Would restore the owned Sunshine capture settings" \
-        "Sunshine, Moonlight, krfb, and user backups would remain installed"
+        "Sunshine, Moonlight, and user backups would remain installed"
     exit 0
 fi
 
 if (( ! AUTO_CONFIRM )); then
     ui_question \
-        "Remove Dual Screen Mode?\n\nThis turns the mode off, restores the saved audio state, and removes only Dual Screen Mode's files and settings. Sunshine, Moonlight, krfb, and your backups stay installed." ||
+        "Remove Dual Screen Mode?\n\nThis turns the mode off, restores the saved audio state, and removes only Dual Screen Mode's files and settings. Sunshine, Moonlight, and your backups stay installed." ||
         exit 0
 fi
 
@@ -398,9 +464,10 @@ if [[ -f "$STATE_DIR/owned-uninstaller" ]]; then
     rmdir "$UNINSTALL_APP_DIR" 2>/dev/null || true
 fi
 if [[ -f "$STATE_DIR/owned-management-app" ]]; then
-    rm -f "$MANAGEMENT_SCRIPT_DEST" "$MOTION_MONITOR_DEST" "$MOTION_DISCOVERY_DEST" "$DISPLAY_LAYOUT_DEST" "$CEMU_PROFILE_DEST" "$MOTION_PROBE_DIR_DEST/dsu_motion_probe.py" "$MOTION_PROBE_DIR_DEST/__init__.py"
+    rm -f "$MANAGEMENT_SCRIPT_DEST" "$MOTION_MONITOR_DEST" "$MOTION_DISCOVERY_DEST" "$DISPLAY_LAYOUT_DEST" "$GNOME_VMON_DEST" "$CEMU_PROFILE_DEST" "$MOTION_PROBE_DIR_DEST/dsu_motion_probe.py" "$MOTION_PROBE_DIR_DEST/__init__.py"
     rmdir "$MOTION_PROBE_DIR_DEST" 2>/dev/null || true
     rm -f "$STATE_DIR/owned-management-app"
+    rm -f "$STATE_DIR/sunshine-mode"
     rmdir "$UNINSTALL_APP_DIR" 2>/dev/null || true
 fi
 if [[ -f "$STATE_DIR/owned-management-launcher" ]]; then
@@ -409,9 +476,9 @@ if [[ -f "$STATE_DIR/owned-management-launcher" ]]; then
 fi
 
 if have notify-send; then
-    notify-send "Dual Screen Mode" "Uninstalled. Sunshine, Moonlight, krfb, and backups remain." 2>/dev/null || true
+    notify-send "Dual Screen Mode" "Uninstalled. Sunshine, Moonlight, and backups remain." 2>/dev/null || true
 fi
 if (( ! AUTO_CONFIRM )); then
-    ui_message "Dual Screen Mode was uninstalled.\n\nIts shortcuts and settings are gone. Sunshine, Moonlight, krfb, and your backups were left installed."
+    ui_message "Dual Screen Mode was uninstalled.\n\nIts shortcuts and settings are gone. Sunshine, Moonlight, and your backups were left installed."
 fi
 

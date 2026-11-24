@@ -19,6 +19,19 @@ ICON_PATH = BASE_DIR / "assets" / "dual-screen-mode.png"
 TOGGLE_PATH = Path.home() / ".local" / "bin" / "dual-screen-mode"
 
 
+def _detect_desktop():
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", os.environ.get("XDG_SESSION_DESKTOP", ""))
+    lowered = desktop.lower()
+    if "gnome" in lowered or "ubuntu" in lowered:
+        return "gnome"
+    return "kde"
+
+
+DSM_DESKTOP = os.environ.get("DUAL_SCREEN_DESKTOP", _detect_desktop())
+if DSM_DESKTOP not in ("kde", "gnome"):
+    DSM_DESKTOP = "kde"
+
+
 class DualScreenWizard(tk.Tk):
     COLORS = {
         "ink": "#e6edf4",
@@ -52,7 +65,7 @@ class DualScreenWizard(tk.Tk):
         self.install_started = False
         self.install_failed = False
         self.install_process = None
-        self.krfb_missing = False
+        self.deps_missing = False
         self.check_started = False
         self.test_running = False
         self.events = queue.Queue()
@@ -271,36 +284,56 @@ class DualScreenWizard(tk.Tk):
         grid.pack(fill="x", pady=(22, 8))
         for col in range(2):
             grid.grid_columnconfigure(col, weight=1)
-        self.card(grid, "KDE Plasma on Wayland", "Required host environment", column=0, row=0, symbol="PC", status_var=self.requirement_status_vars["host"])
+        host_label = "GNOME on Wayland (46+)" if DSM_DESKTOP == "gnome" else "KDE Plasma on Wayland"
+        display_label = "Mutter virtual monitor + PipeWire" if DSM_DESKTOP == "gnome" else "krfb virtual display"
+        self.card(grid, host_label, "Required host environment", column=0, row=0, symbol="PC", status_var=self.requirement_status_vars["host"])
         self.card(grid, "Sunshine", "Offers the host stream", column=1, row=0, symbol="↔", status_var=self.requirement_status_vars["sunshine"])
-        self.card(grid, "krfb virtual display", "Creates the second screen", column=0, row=1, symbol="▣", status_var=self.requirement_status_vars["display"])
+        self.card(grid, display_label, "Creates the second screen", column=0, row=1, symbol="▣", status_var=self.requirement_status_vars["display"])
         self.card(grid, "Supported graphics", "Used by the host encoder", column=1, row=1, symbol="GPU", status_var=self.requirement_status_vars["graphics"])
         status = tk.Frame(page, bg="#1b3044", highlightbackground="#315d80", highlightthickness=1)
         status.pack(fill="x", pady=(20, 0))
         tk.Label(status, textvariable=self.check_status_var, bg="#1b3044", fg="#c0cfdd", font=("TkDefaultFont", 9), justify="left", anchor="w").pack(anchor="w", padx=16, pady=14)
 
-        self.krfb_action = tk.Frame(page, bg=self.COLORS["paper2"], highlightbackground=self.COLORS["line"], highlightthickness=1)
-        self.krfb_action_text = tk.StringVar(value="")
-        tk.Label(self.krfb_action, text="KDE's virtual-display package is missing", bg=self.COLORS["paper2"], fg=self.COLORS["warning"], font=("TkDefaultFont", 10, "bold"), anchor="w").pack(anchor="w", padx=16, pady=(14, 3))
-        tk.Label(self.krfb_action, text="1. Click Open installation terminal.\n2. Enter your normal system password and let the package finish.\n3. Close Konsole, then click Check again.", bg=self.COLORS["paper2"], fg=self.COLORS["ink"], font=("TkDefaultFont", 10), justify="left", anchor="w", wraplength=680).pack(anchor="w", padx=16, pady=(0, 8))
-        tk.Label(self.krfb_action, textvariable=self.krfb_action_text, bg=self.COLORS["paper2"], fg=self.COLORS["soft"], font=("TkDefaultFont", 9), justify="left", anchor="w", wraplength=680).pack(anchor="w", padx=16)
-        krfb_buttons = tk.Frame(self.krfb_action, bg=self.COLORS["paper2"])
-        krfb_buttons.pack(anchor="w", padx=16, pady=(12, 14))
-        self.krfb_install_button = self.make_button(krfb_buttons, "Open installation terminal", self.open_krfb_terminal, primary=True)
-        self.krfb_install_button.pack(side="left", padx=(0, 8))
-        self.krfb_check_button = self.make_button(krfb_buttons, "Check again", self.check_krfb, primary=False)
-        self.krfb_check_button.pack(side="left")
+        if DSM_DESKTOP == "gnome":
+            missing_title = "GNOME virtual-display dependencies are missing"
+            missing_steps = "1. Click Open installation terminal.\n2. Enter your normal system password and let the packages finish.\n3. Close the terminal, then click Check again."
+        else:
+            missing_title = "KDE's virtual-display package is missing"
+            missing_steps = "1. Click Open installation terminal.\n2. Enter your normal system password and let the package finish.\n3. Close Konsole, then click Check again."
+        self.deps_action = tk.Frame(page, bg=self.COLORS["paper2"], highlightbackground=self.COLORS["line"], highlightthickness=1)
+        self.deps_action_text = tk.StringVar(value="")
+        tk.Label(self.deps_action, text=missing_title, bg=self.COLORS["paper2"], fg=self.COLORS["warning"], font=("TkDefaultFont", 10, "bold"), anchor="w").pack(anchor="w", padx=16, pady=(14, 3))
+        tk.Label(self.deps_action, text=missing_steps, bg=self.COLORS["paper2"], fg=self.COLORS["ink"], font=("TkDefaultFont", 10), justify="left", anchor="w", wraplength=680).pack(anchor="w", padx=16, pady=(0, 8))
+        tk.Label(self.deps_action, textvariable=self.deps_action_text, bg=self.COLORS["paper2"], fg=self.COLORS["soft"], font=("TkDefaultFont", 9), justify="left", anchor="w", wraplength=680).pack(anchor="w", padx=16)
+        deps_buttons = tk.Frame(self.deps_action, bg=self.COLORS["paper2"])
+        deps_buttons.pack(anchor="w", padx=16, pady=(12, 14))
+        self.deps_install_button = self.make_button(deps_buttons, "Open installation terminal", self.open_deps_terminal, primary=True)
+        self.deps_install_button.pack(side="left", padx=(0, 8))
+        self.deps_check_button = self.make_button(deps_buttons, "Check again", self.check_deps, primary=False)
+        self.deps_check_button.pack(side="left")
 
     def build_permissions(self):
         page = self.new_page()
-        self.heading(page, "Step 2 · Setup and permissions", "What will change?", "The setup adds the virtual display support, configures Sunshine for KDE capture, and routes Sunshine's virtual touchscreen to that display when it appears. DSU motion monitoring stays local to the host and runs only while the mode is active.")
+        if DSM_DESKTOP == "gnome":
+            heading_detail = "The setup adds GNOME virtual-monitor support, configures Sunshine for portal capture, and routes Sunshine's virtual touchscreen to that display when it appears. DSU motion monitoring stays local to the host and runs only while the mode is active."
+            capture_sub = "Use the XDG portal on the virtual monitor"
+            permission_title = "One portal permission"
+            permission_sub = "GNOME asks once which screen Sunshine may share"
+            virtual_sub = "Mutter virtual monitor if dependencies are missing"
+        else:
+            heading_detail = "The setup adds the virtual display support, configures Sunshine for KDE capture, and routes Sunshine's virtual touchscreen to that display when it appears. DSU motion monitoring stays local to the host and runs only while the mode is active."
+            capture_sub = "Use KDE’s virtual output and touch routing"
+            permission_title = "One user-level permission"
+            permission_sub = "Allows KWin capture for Sunshine"
+            virtual_sub = "Add the KDE component if needed"
+        self.heading(page, "Step 2 · Setup and permissions", "What will change?", heading_detail)
         grid = tk.Frame(page, bg=self.COLORS["paper"])
         grid.pack(fill="x", pady=(22, 8))
         for col in range(2):
             grid.grid_columnconfigure(col, weight=1)
-        self.card(grid, "Virtual second screen", "Add the KDE component if needed", column=0, row=0, symbol="▣")
-        self.card(grid, "Sunshine capture", "Use KDE’s virtual output and touch routing", column=1, row=0, symbol="↔")
-        self.card(grid, "One user-level permission", "Allows KWin capture for Sunshine", column=0, row=1, symbol="✓")
+        self.card(grid, "Virtual second screen", virtual_sub, column=0, row=0, symbol="▣")
+        self.card(grid, "Sunshine capture", capture_sub, column=1, row=0, symbol="↔")
+        self.card(grid, permission_title, permission_sub, column=0, row=1, symbol="✓")
         self.card(grid, "Settings app", "View status, motion, diagnostics, and uninstall", column=1, row=1, symbol="⚙")
         self.make_label(page, "The setup keeps things simple. Motion monitoring is enabled by default and looks for your Steam Deck automatically on the local network. Settings can show the connection, retry discovery, open separate diagnostics, and disable motion if you prefer.", size=10, color=self.COLORS["soft"], wrap=680).pack(anchor="w", pady=(25, 0))
 
@@ -356,7 +389,7 @@ class DualScreenWizard(tk.Tk):
             self.review_vars[key] = variable
             tk.Label(row, textvariable=variable, bg=self.COLORS["paper2"], fg=self.COLORS["ink"], font=("TkDefaultFont", 9, "bold")).pack(side="right")
         self.update_review()
-        self.make_label(page, "Install creates the Dual Screen Mode shortcut and the Dual Screen Mode Settings app. Sunshine, Moonlight, krfb, and backups remain available after uninstall.", size=10, color=self.COLORS["soft"], wrap=680).pack(anchor="w", pady=(23, 0))
+        self.make_label(page, "Install creates the Dual Screen Mode shortcut and the Dual Screen Mode Settings app. Sunshine, Moonlight, and backups remain available after uninstall.", size=10, color=self.COLORS["soft"], wrap=680).pack(anchor="w", pady=(23, 0))
 
     def build_progress(self):
         page = self.new_page()
@@ -364,7 +397,10 @@ class DualScreenWizard(tk.Tk):
         self.progress_detail = tk.Label(page, textvariable=self.progress_detail_var, bg=self.COLORS["paper"], fg=self.COLORS["soft"], font=("TkDefaultFont", 10), anchor="w")
         self.progress_detail.pack(anchor="w", pady=(18, 8))
         self.progress_rows = []
-        items = [("Check the host environment", "KDE Plasma and Wayland"), ("Prepare the virtual display", "krfb-virtualmonitor"), ("Prepare Sunshine", "Capture, touch routing, and audio"), ("Apply KDE capture permission", "User-level setting"), ("Create the shortcuts", "Dual Screen Mode and Dual Screen Mode Settings")]
+        if DSM_DESKTOP == "gnome":
+            items = [("Check the host environment", "GNOME on Wayland"), ("Prepare the virtual display", "Mutter virtual monitor + PipeWire"), ("Prepare Sunshine", "Portal capture, touch routing, and audio"), ("Check the GNOME capture permission", "XDG portal screen share"), ("Create the shortcuts", "Dual Screen Mode and Dual Screen Mode Settings")]
+        else:
+            items = [("Check the host environment", "KDE Plasma and Wayland"), ("Prepare the virtual display", "krfb-virtualmonitor"), ("Prepare Sunshine", "Capture, touch routing, and audio"), ("Apply KDE capture permission", "User-level setting"), ("Create the shortcuts", "Dual Screen Mode and Dual Screen Mode Settings")]
         for index, (title, sub) in enumerate(items):
             row = tk.Frame(page, bg=self.COLORS["paper2"], highlightbackground=self.COLORS["line"], highlightthickness=1)
             row.pack(fill="x", pady=5)
@@ -389,7 +425,11 @@ class DualScreenWizard(tk.Tk):
         tk.Label(text, text="Your Dual Screen Mode shortcuts are ready.", bg=self.COLORS["paper2"], fg=self.COLORS["blue_bright"], font=("TkDefaultFont", 10, "bold"), anchor="w").pack(anchor="w")
         tk.Label(text, text="Dual Screen Mode enables or disables the virtual display. Dual Screen Mode Settings lets you change options or remove the project.", bg=self.COLORS["paper2"], fg=self.COLORS["soft"], font=("TkDefaultFont", 9), wraplength=510, justify="left", anchor="w").pack(anchor="w", pady=(7, 0))
         tk.Label(page, textvariable=self.test_result_var, bg=self.COLORS["paper"], fg=self.COLORS["good"], font=("TkDefaultFont", 9), justify="left", anchor="w", wraplength=680).pack(anchor="w", pady=(22, 0))
-        self.make_label(page, "Open Moonlight on the handheld, choose the already-paired host, and follow its normal Sunshine pairing flow if needed. DSM refreshes Sunshine when the mode starts so it loads the virtual display. Motion is enabled by default and looks for your Steam Deck automatically. Settings can show the DSU status, retry discovery, or open the separate motion diagnostics and temporary calibration view. If Cemu is found, keep Cemu closed while DSM prepares the Deck Gyro profile and saved DSU address. Wait for DSM's profile-ready notification, then open Cemu Input settings and select Dual Screen Mode Deck Gyro. No manual IP or Add input API step is needed. DSM does not install emulators. If KDE needs a refresh for the new capture permission, log out and back in or restart the host computer.", size=10, color=self.COLORS["soft"], wrap=680).pack(anchor="w", pady=(22, 0))
+        if DSM_DESKTOP == "gnome":
+            closing_note = "If GNOME asks which screen Sunshine may share, pick the virtual monitor once; Sunshine remembers the choice."
+        else:
+            closing_note = "If KDE needs a refresh for the new capture permission, log out and back in or restart the host computer."
+        self.make_label(page, "Open Moonlight on the handheld, choose the already-paired host, and follow its normal Sunshine pairing flow if needed. DSM refreshes Sunshine when the mode starts so it loads the virtual display. Motion is enabled by default and looks for your Steam Deck automatically. Settings can show the DSU status, retry discovery, or open the separate motion diagnostics and temporary calibration view. If Cemu is found, keep Cemu closed while DSM prepares the Deck Gyro profile and saved DSU address. Wait for DSM's profile-ready notification, then open Cemu Input settings and select Dual Screen Mode Deck Gyro. No manual IP or Add input API step is needed. DSM does not install emulators. " + closing_note, size=10, color=self.COLORS["soft"], wrap=680).pack(anchor="w", pady=(22, 0))
 
     def resolution_changed(self, _event=None):
         if self.resolution_var.get() == "Custom":
@@ -477,8 +517,11 @@ class DualScreenWizard(tk.Tk):
             self.run_host_check()
 
     def next_page(self):
-        if self.page_index == 1 and self.krfb_missing:
-            self.check_status_var.set("krfb is still missing. Install it in Konsole, then click Check again.")
+        if self.page_index == 1 and self.deps_missing:
+            if DSM_DESKTOP == "gnome":
+                self.check_status_var.set("GNOME virtual-display dependencies are still missing. Install them in the terminal, then click Check again.")
+            else:
+                self.check_status_var.set("krfb is still missing. Install it in Konsole, then click Check again.")
             return
         if self.page_index == 5:
             self.start_install()
@@ -501,9 +544,12 @@ class DualScreenWizard(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
         self.after(100, self.poll_events)
 
-    def check_krfb(self):
+    def check_deps(self):
         self.check_started = False
-        self.check_status_var.set("Checking for krfb-virtualmonitor...")
+        if DSM_DESKTOP == "gnome":
+            self.check_status_var.set("Checking for GNOME virtual-display dependencies...")
+        else:
+            self.check_status_var.set("Checking for krfb-virtualmonitor...")
         for status in self.requirement_status_vars.values():
             status.set("Checking")
         self.run_host_check()
@@ -513,9 +559,9 @@ class DualScreenWizard(tk.Tk):
         host_ready = returncode == 0 and "desktop session:" in lower
         self.requirement_status_vars["host"].set("✓ Ready" if host_ready else "Review")
         self.requirement_status_vars["graphics"].set("✓ Ready" if returncode == 0 else "Review")
-        if "krfb-virtualmonitor is missing" in lower:
+        if "krfb-virtualmonitor is missing" in lower or "gnome virtual-display dependencies are missing" in lower:
             self.requirement_status_vars["display"].set("Needs install")
-        elif "krfb-virtualmonitor is ready" in lower:
+        elif "krfb-virtualmonitor is ready" in lower or "gnome virtual-display dependencies are ready" in lower or "gnome mutter virtual-monitor support is ready" in lower:
             self.requirement_status_vars["display"].set("✓ Ready")
         else:
             self.requirement_status_vars["display"].set("Review")
@@ -526,16 +572,33 @@ class DualScreenWizard(tk.Tk):
         else:
             self.requirement_status_vars["sunshine"].set("Review")
 
-    def open_krfb_terminal(self):
-        if not shutil.which("konsole"):
-            messagebox.showerror(
-                "Konsole not found",
-                "Konsole is needed to install krfb. Open a terminal manually and install the KDE krfb package, then return and click Check again.",
-                parent=self,
-            )
-            return
-
-        root_script = """set -u
+    def open_deps_terminal(self):
+        if DSM_DESKTOP == "gnome":
+            root_script = """set -u
+dnf install -y pipewire-gstreamer gstreamer1-plugins-base gstreamer1-plugins-good libinput-utils python3-gobject
+status=$?
+if command -v gst-inspect-1.0 >/dev/null 2>&1 && ! gst-inspect-1.0 pipewiresrc >/dev/null 2>&1; then
+    dnf install -y gstreamer1-plugin-pipewire || true
+fi
+if (( status == 0 )); then
+    printf '\\nGNOME dependency installation finished. Close this terminal, then click Check again in the wizard.\\n'
+else
+    printf '\\nGNOME dependency installation failed. Review the message above, then close this terminal.\\n'
+fi
+read -r -p 'Press Enter to close this terminal... '
+exit "$status"
+"""
+            terminal_candidates = ["gnome-terminal", "konsole", "xterm", "xfce4-terminal", "kgx"]
+            terminal_name = next((name for name in terminal_candidates if shutil.which(name)), None)
+            if terminal_name is None:
+                messagebox.showerror(
+                    "No terminal found",
+                    "No supported terminal was found. Open a terminal manually and run: sudo dnf install -y pipewire-gstreamer gstreamer1-plugins-base gstreamer1-plugins-good libinput-utils python3-gobject, then return and click Check again.",
+                    parent=self,
+                )
+                return
+        else:
+            root_script = """set -u
 if command -v steamos-readonly >/dev/null 2>&1; then
     steamos-readonly disable || exit 1
     trap 'steamos-readonly enable' EXIT
@@ -552,15 +615,32 @@ fi
 read -r -p 'Press Enter to close this terminal... '
 exit "$status"
 """
+            terminal_name = next((name for name in ("konsole", "gnome-terminal", "xterm", "xfce4-terminal", "kgx") if shutil.which(name)), None)
+            if terminal_name is None:
+                messagebox.showerror(
+                    "No terminal found",
+                    "No supported terminal was found. Open a terminal manually and install the KDE krfb package, then return and click Check again.",
+                    parent=self,
+                )
+                return
+
         terminal_script = "sudo bash -c " + shlex.quote(root_script)
+        if terminal_name == "gnome-terminal":
+            command = ["gnome-terminal", "--", "bash", "-lc", terminal_script]
+        elif terminal_name == "xterm":
+            command = ["xterm", "-e", "bash", "-lc", terminal_script]
+        elif terminal_name == "konsole":
+            command = ["konsole", "--separate", "-e", "bash", "-lc", terminal_script]
+        else:
+            command = [terminal_name, "-e", "bash", "-lc", terminal_script]
         try:
-            subprocess.Popen(
-                ["konsole", "--separate", "-e", "bash", "-lc", terminal_script],
-                start_new_session=True,
-            )
-            self.krfb_action_text.set("Konsole is open. Finish the package installation there, close it, then click Check again.")
+            subprocess.Popen(command, start_new_session=True)
+            if DSM_DESKTOP == "gnome":
+                self.deps_action_text.set("The terminal is open. Finish the package installation there, close it, then click Check again.")
+            else:
+                self.deps_action_text.set("Konsole is open. Finish the package installation there, close it, then click Check again.")
         except OSError as exc:
-            messagebox.showerror("Could not open Konsole", str(exc), parent=self)
+            messagebox.showerror("Could not open the terminal", str(exc), parent=self)
 
     def start_install(self):
         if self.install_started:
@@ -634,17 +714,24 @@ exit "$status"
                 event = self.events.get_nowait()
                 if event[0] == "check":
                     output = event[2]
+                    lower = output.lower()
                     self.update_requirement_statuses(output, event[1])
-                    self.krfb_missing = "krfb-virtualmonitor is missing" in output
-                    if self.krfb_missing:
-                        self.check_status_var.set("The virtual-display package is missing. Follow the instructions below before continuing.")
-                        self.krfb_action_text.set("Your password is entered in Konsole, not in Dual Screen Mode.")
-                        self.krfb_action.pack(fill="x", pady=(16, 0))
+                    self.deps_missing = (
+                        "krfb-virtualmonitor is missing" in lower
+                        or "gnome virtual-display dependencies are missing" in lower
+                    )
+                    if self.deps_missing:
+                        self.check_status_var.set("The virtual-display component is missing. Follow the instructions below before continuing.")
+                        if DSM_DESKTOP == "gnome":
+                            self.deps_action_text.set("Your password is entered in the terminal, not in Dual Screen Mode.")
+                        else:
+                            self.deps_action_text.set("Your password is entered in Konsole, not in Dual Screen Mode.")
+                        self.deps_action.pack(fill="x", pady=(16, 0))
                         if self.page_index == 1:
                             self.next_button.configure(state="disabled")
                     elif event[1] == 0:
                         self.check_status_var.set("This host is ready for the setup.")
-                        self.krfb_action.pack_forget()
+                        self.deps_action.pack_forget()
                         if self.page_index == 1:
                             self.next_button.configure(state="normal")
                     else:

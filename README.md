@@ -6,13 +6,13 @@
 
 <p align="center"><strong>Use a Steam Deck or other PC handheld as a wireless second screen for a Linux gaming PC.</strong></p>
 
-Dual Screen Mode is a small KDE Plasma utility that lets you use a handheld like a Wii U GamePad, a DS or 3DS second screen, or a regular wireless monitor.
+Dual Screen Mode is a small KDE Plasma / GNOME utility that lets you use a handheld like a Wii U GamePad, a DS or 3DS second screen, or a regular wireless monitor.
 
 It creates a virtual display on the host PC, prepares Sunshine to stream that display, and gives you simple desktop shortcuts to turn the setup on and off.
 
 It can be used for emulation, but it is not limited to emulation. You can also use the handheld as an extra wireless display for regular desktop or gaming use.
 
-This is beta release **0.1.5-beta** for SteamOS and KDE Plasma on Wayland.
+This is beta release **0.1.5-beta** for SteamOS/KDE Plasma on Wayland, with a GNOME port for Nobara and other Fedora-based GNOME desktops (GNOME 46+ on Wayland).
 
 ## What's new
 
@@ -52,13 +52,13 @@ The setup uses two existing streaming tools:
 - **Sunshine:** The streaming server running on the host.
 - **Moonlight:** The app on the handheld that connects to Sunshine.
 
-The currently validated host setup is:
+The currently validated host setups are:
 
-- SteamOS or another Arch-based Linux installation
-- KDE Plasma on Wayland
-- Sunshine installed through Flatpak
-- KDE's `krfb-virtualmonitor` component
+- SteamOS or another Arch-based Linux installation with KDE Plasma on Wayland, Sunshine through Flatpak, and KDE's `krfb-virtualmonitor` component
+- Nobara (or another Fedora-based distro) with GNOME on Wayland 46+, Sunshine installed as a native package (LizardByte COPR) or Flatpak, and Mutter's built-in virtual monitor (no extra display hardware needed)
 - The host and handheld connected to the same local network
+
+On GNOME the second screen is created through Mutter's `RecordVirtual` API and streamed with Sunshine's `portal` capture. The first stream may show GNOME's screen-share dialog; pick the virtual monitor once and Sunshine remembers the choice. Touch is routed through the `org.gnome.desktop.peripherals.touchscreen` setting instead of KWin.
 
 The client can be a Steam Deck, another PC handheld, tablet, or phone that supports Moonlight. Physical handheld controls are available only on devices that have them.
 
@@ -206,9 +206,9 @@ After setup:
 
 The virtual display remains active if Moonlight disconnects, so the handheld can reconnect without rebuilding the display.
 
-Choose a virtual display size that matches the handheld's screen. Some setups may also need adjustments in the host's KDE Display Configuration settings, such as scaling or display arrangement.
+Choose a virtual display size that matches the handheld's screen. Some setups may also need adjustments in the host's display settings (KDE Display Configuration or GNOME Settings → Displays), such as scaling or display arrangement.
 
-The host must remain in KDE Desktop Mode while the virtual display is active.
+The host must remain in a desktop session while the virtual display is active (KDE Desktop Mode, or GNOME Desktop Mode on a handheld running Nobara).
 
 Emulator controller profiles and touch settings are configured separately inside each emulator.
 
@@ -357,7 +357,8 @@ This is a one-person beta tested primarily with a Steam Machine and Steam Deck.
 - Emulator-specific touch behavior is outside this project.
 - Microphone forwarding is not included. Cemu receives the focused DSMController profile described above; emulator-facing motion selection for Azahar, melonDS, and other emulators remains separate.
 - Other KDE, graphics, and handheld combinations may have issues that have not been tested yet.
-- Ubuntu, Fedora, GNOME, X11, and other non-Arch or non-KDE setups are not currently supported by the installer.
+- X11 sessions and other non-Wayland setups are not currently supported by the installer. GNOME support targets Wayland only (Nobara's default; on a Steam Deck running Nobara, use Desktop Mode).
+- On GNOME, Sunshine's portal capture may ask once which screen to share; choose the virtual monitor (`Meta-0`) and the choice is remembered. If the virtual monitor disappears between sessions, reconnect Moonlight after toggling the mode back on.
 
 If something behaves strangely, open a GitHub issue and include the host, handheld, desktop session, display setup, and what happened.
 

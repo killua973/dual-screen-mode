@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased: GNOME / Nobara port
+
+- Added a GNOME on Wayland backend (Nobara/Fedora, GNOME 46+). The virtual
+  second screen is created through Mutter's `RecordVirtual` ScreenCast API by
+  the new `gnome_vmon.py` helper; no `krfb` or dummy plug is needed. The monitor
+  is placed centered below the main display through Mutter's DisplayConfig API
+  and disappears when the mode turns off.
+- Sunshine on GNOME uses `capture = portal` with the dynamic `Meta-N` connector
+  as `output_name`; native package installs (`~/.config/sunshine/sunshine.conf`,
+  LizardByte COPR via dnf) are supported alongside the Flatpak.
+- Touch routing on GNOME uses the `org.gnome.desktop.peripherals.touchscreen`
+  per-device `output` mapping instead of KWin's `outputName`.
+- Setup wizard and graphical wizard detect the desktop and use dnf plus a
+  desktop terminal (gnome-terminal preferred) on GNOME instead of pacman/Konsole.
+- Settings app shows GNOME display status through the same helper and picks the
+  correct Sunshine log path for native or Flatpak installs.
+- Uninstaller restores GNOME touch mappings, stops the Mutter virtual-monitor
+  helper, and removes the GNOME helper file.
+- Added `tests/test-gnome-toggle.sh` covering the GNOME toggle lifecycle,
+  placement, touch routing, and Sunshine config save/restore.
+
 ## 0.1.4 Beta
 
 - Map Sunshine's virtual touchscreen to `Virtual-DualScreen` through KWin while

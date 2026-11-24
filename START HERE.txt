@@ -1,5 +1,11 @@
 DUAL SCREEN MODE
 
+Works on KDE Plasma (SteamOS/Arch) and on GNOME (Nobara/Fedora, Wayland).
+On GNOME no dummy plug or krfb is needed: the second screen is a Mutter
+virtual monitor, Sunshine uses portal capture, and touch routing uses the
+GNOME touchscreen setting. On the first stream GNOME may ask which screen
+Sunshine may share; pick the virtual monitor (Meta-0) once.
+
 Quick start
 
 1. Double-click "Install Dual Screen Mode.desktop".

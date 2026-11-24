@@ -3,6 +3,7 @@
 import json
 import os
 import queue
+import shutil
 import signal
 import subprocess
 import sys
@@ -21,6 +22,38 @@ os.umask(0o077)
 APP_VERSION = "0.1.5-beta"
 VIRTUAL_NAME = "DualScreen"
 SUNSHINE_APP = "dev.lizardbyte.app.Sunshine"
+
+
+def _detect_desktop():
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", os.environ.get("XDG_SESSION_DESKTOP", ""))
+    lowered = desktop.lower()
+    if "gnome" in lowered or "ubuntu" in lowered:
+        return "gnome"
+    return "kde"
+
+
+DSM_DESKTOP = os.environ.get("DUAL_SCREEN_DESKTOP", _detect_desktop())
+if DSM_DESKTOP not in ("kde", "gnome"):
+    DSM_DESKTOP = "kde"
+
+
+def _sunshine_mode():
+    state_marker = Path.home() / ".local" / "state" / "dual-screen-mode" / "sunshine-mode"
+    try:
+        saved = state_marker.read_text(encoding="utf-8").strip()
+        if saved in ("flatpak", "native"):
+            return saved
+    except OSError:
+        pass
+    if shutil.which("flatpak") and subprocess.run(["flatpak", "info", SUNSHINE_APP], capture_output=True).returncode == 0:
+        return "flatpak"
+    if shutil.which("sunshine"):
+        return "native"
+    return "flatpak"
+
+
+SUNSHINE_MODE = _sunshine_mode()
+GNOME_VMON_HELPER = Path(__file__).resolve().parent / "gnome_vmon.py"
 SETTINGS_FILE = Path.home() / ".config" / "dual-screen-mode" / "settings.conf"
 RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "dual-screen-mode"
 TOGGLE_PATH = Path.home() / ".local" / "bin" / "dual-screen-mode"
@@ -836,7 +869,11 @@ class SettingsApp(tk.Tk):
         self.card(grid, "If the picture is tiny", "Match the saved display size to the handheld, check Moonlight's stream resolution, and adjust the PC's display scaling settings if needed.", 0, 1)
         self.card(grid, "If a game does not respond", "Moonlight sends the handheld's controls to the host. For Cemu, select the prepared Dual Screen Mode Deck Gyro profile. Other emulator and game-specific input setup remains outside Dual Screen Mode.", 1, 1)
         self.card(grid, "If touch hits the wrong screen", "Disable and re-enable Dual Screen Mode. The touch status updates automatically and will show whether the handheld touchscreen is mapped, waiting, or unavailable.", 0, 2)
-        self.card(grid, "What the mode changes", "It creates a KDE virtual display, maps the handheld touchscreen to that display when it appears, refreshes the Flatpak Sunshine session so its virtual-display target is loaded, and changes Sunshine's capture and audio-stream settings. When enabled, the motion monitor runs only while the mode is active, reconnects when the Deck briefly disappears, and updates its status automatically. Settings can check motion while it is open. Handheld mode may mute the current default output for the session. It does not change the default output, install a driver, create a blank or virtual audio device, or alter other outputs. Saved audio and temporary Sunshine display values are restored when the mode turns off, and a Sunshine session that was already running is returned. Temporary startup logs are kept in the Dual Screen Mode runtime folder.", wide=True, row=3)
+        if DSM_DESKTOP == "gnome":
+            mode_changes = "It creates a GNOME (Mutter) virtual monitor, maps the handheld touchscreen to that display through the GNOME touchscreen settings when it appears, refreshes the Sunshine session so its virtual-display target is loaded, and changes Sunshine's portal capture and audio-stream settings. When enabled, the motion monitor runs only while the mode is active, reconnects when the Deck briefly disappears, and updates its status automatically. Settings can check motion while it is open. Handheld mode may mute the current default output for the session. It does not change the default output, install a driver, create a blank or virtual audio device, or alter other outputs. Saved audio and temporary Sunshine display values are restored when the mode turns off, and a Sunshine session that was already running is returned. Temporary startup logs are kept in the Dual Screen Mode runtime folder."
+        else:
+            mode_changes = "It creates a KDE virtual display, maps the handheld touchscreen to that display when it appears, refreshes the Flatpak Sunshine session so its virtual-display target is loaded, and changes Sunshine's capture and audio-stream settings. When enabled, the motion monitor runs only while the mode is active, reconnects when the Deck briefly disappears, and updates its status automatically. Settings can check motion while it is open. Handheld mode may mute the current default output for the session. It does not change the default output, install a driver, create a blank or virtual audio device, or alter other outputs. Saved audio and temporary Sunshine display values are restored when the mode turns off, and a Sunshine session that was already running is returned. Temporary startup logs are kept in the Dual Screen Mode runtime folder."
+        self.card(grid, "What the mode changes", mode_changes, wide=True, row=3)
         actions = tk.Frame(page, bg=self.COLORS["paper"])
         actions.pack(fill="x", pady=(18, 0))
         tk.Button(actions, text="Open Sunshine log", command=self.open_sunshine_log, bg=self.COLORS["card2"], fg=self.COLORS["ink"], activebackground="#24445d", relief="flat", bd=0, padx=13, pady=8, font=("TkDefaultFont", 8, "bold"), cursor="hand2").pack(side="left", padx=(0, 8))
@@ -844,6 +881,8 @@ class SettingsApp(tk.Tk):
 
     @property
     def sunshine_log_path(self):
+        if SUNSHINE_MODE == "native":
+            return Path.home() / ".config" / "sunshine" / "sunshine.log"
         return Path.home() / ".var" / "app" / SUNSHINE_APP / "config" / "sunshine" / "sunshine.log"
 
     def open_sunshine_log(self):
@@ -887,7 +926,11 @@ class SettingsApp(tk.Tk):
         grid.grid_columnconfigure(0, weight=1)
         self.card(grid, "What this project does", "Dual Screen Mode brings together the pieces needed to create a virtual display, stream it over your local network, and use a handheld alongside the host computer.", wide=True)
         self.card(grid, "How it came together", "This project collects existing tools, guides, and configuration steps into one repeatable setup that is easier to install and share.", wide=True, row=1)
-        self.card(grid, "Built with", "KDE Plasma and krfb virtual display\nKWin input routing for Sunshine's virtual touchscreen\nSunshine for host streaming\nMoonlight for the handheld connection", wide=True, row=2)
+        if DSM_DESKTOP == "gnome":
+            built_with = "GNOME (Mutter) virtual monitor via PipeWire\nGNOME touchscreen mapping for Sunshine's virtual touchscreen\nSunshine for host streaming\nMoonlight for the handheld connection"
+        else:
+            built_with = "KDE Plasma and krfb virtual display\nKWin input routing for Sunshine's virtual touchscreen\nSunshine for host streaming\nMoonlight for the handheld connection"
+        self.card(grid, "Built with", built_with, wide=True, row=2)
         self.card(grid, "Credits and license", "Made by slinky. Dual Screen Mode is released under the MIT License and credits the tools and community guides that make the setup possible.", wide=True, row=3)
 
     def build_uninstall(self):
@@ -963,7 +1006,10 @@ class SettingsApp(tk.Tk):
                     self.note_var.set("Dual Screen Mode is currently active.")
         elif marked_active and display_present is False:
             self.status_var.set("Virtual display needs recovery")
-            self.status_detail_var.set("KDE no longer reports the virtual display. Double-click the toggle to reset the mode.")
+            if DSM_DESKTOP == "gnome":
+                self.status_detail_var.set("GNOME no longer reports the virtual display. Double-click the toggle to reset the mode.")
+            else:
+                self.status_detail_var.set("KDE no longer reports the virtual display. Double-click the toggle to reset the mode.")
             self.status_badge_var.set("CHECK")
             self.host_status.configure(text="Needs attention", fg=self.COLORS["red"])
             if update_note:
@@ -1008,6 +1054,18 @@ class SettingsApp(tk.Tk):
 
     @staticmethod
     def virtual_display_present():
+        if DSM_DESKTOP == "gnome":
+            try:
+                connector_file = RUNTIME_DIR / "vmonitor.connector"
+                result = subprocess.run(
+                    ["python3", str(GNOME_VMON_HELPER), "virtual-connector", "--connector-file", str(connector_file)],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode != 0:
+                    return None
+                return bool(result.stdout.strip())
+            except (OSError, subprocess.SubprocessError):
+                return None
         try:
             result = subprocess.run(["kscreen-doctor", "-j"], capture_output=True, text=True, timeout=3)
             if result.returncode != 0:
@@ -1018,6 +1076,17 @@ class SettingsApp(tk.Tk):
 
     @staticmethod
     def sunshine_status():
+        if SUNSHINE_MODE == "native":
+            try:
+                result = subprocess.run(["pgrep", "-x", "sunshine"], capture_output=True, text=True, timeout=3)
+                if result.returncode == 0 and result.stdout.strip():
+                    return "Running"
+                service = subprocess.run(["systemctl", "--user", "is-active", "sunshine"], capture_output=True, text=True, timeout=3)
+                if service.stdout.strip() == "active":
+                    return "Running"
+            except (OSError, subprocess.SubprocessError):
+                pass
+            return "Installed" if shutil.which("sunshine") else "Not installed"
         try:
             result = subprocess.run(["flatpak", "ps", "--app", "--columns=application"], capture_output=True, text=True, timeout=3)
             if SUNSHINE_APP in result.stdout:
@@ -1115,7 +1184,7 @@ class SettingsApp(tk.Tk):
             return
         confirmed = messagebox.askyesno(
             "Uninstall Dual Screen Mode",
-            "Remove Dual Screen Mode's shortcuts and settings?\n\nSunshine, Moonlight, krfb, and your backups will remain installed.",
+            "Remove Dual Screen Mode's shortcuts and settings?\n\nSunshine, Moonlight, and your backups will remain installed.",
         )
         if not confirmed:
             return

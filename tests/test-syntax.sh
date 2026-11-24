@@ -12,7 +12,8 @@ for file in \
     "$root_dir/launch-wizard.sh" \
     "$root_dir/settings-launcher.sh" \
     "$root_dir/tests/test-touch-routing.sh" \
-    "$root_dir/tests/test-setup-execute.sh"; do
+    "$root_dir/tests/test-setup-execute.sh" \
+    "$root_dir/tests/test-gnome-toggle.sh"; do
     if bash -n "$file"; then
         printf 'PASS %s\n' "${file#$root_dir/}"
     else
@@ -39,6 +40,7 @@ for file in \
     "$root_dir/motion_monitor.py" \
     "$root_dir/motion_discovery.py" \
     "$root_dir/display_layout.py" \
+    "$root_dir/gnome_vmon.py" \
     "$root_dir/cemu_profile.py" \
     "$root_dir/motion_probe/dsu_motion_probe.py"; do
     if python3 -c 'compile(open("'$file'", encoding="utf-8").read(), "'"${file#$root_dir/}"'", "exec")'; then

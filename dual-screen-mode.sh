@@ -8,7 +8,27 @@ if [[ ! "$VIRTUAL_NAME" =~ ^[[:alnum:]_-]{1,32}$ ]]; then
     VIRTUAL_NAME="DualScreen"
 fi
 SUNSHINE_APP="dev.lizardbyte.app.Sunshine"
-SUNSHINE_CONF="$HOME/.var/app/$SUNSHINE_APP/config/sunshine/sunshine.conf"
+
+detect_desktop() {
+    local desktop="${XDG_CURRENT_DESKTOP:-${XDG_SESSION_DESKTOP:-}}"
+    case ",${desktop}," in
+        *gnome*|*GNOME*|*ubuntu*|*Ubuntu*) printf 'gnome\n' ;;
+        *) printf 'kde\n' ;;
+    esac
+}
+DSM_DESKTOP="${DUAL_SCREEN_DESKTOP:-$(detect_desktop)}"
+case "$DSM_DESKTOP" in
+    gnome|kde) ;;
+    *) DSM_DESKTOP="kde" ;;
+esac
+
+if command -v flatpak >/dev/null 2>&1 && flatpak info "$SUNSHINE_APP" >/dev/null 2>&1; then
+    SUNSHINE_MODE="flatpak"
+    SUNSHINE_CONF="$HOME/.var/app/$SUNSHINE_APP/config/sunshine/sunshine.conf"
+else
+    SUNSHINE_MODE="native"
+    SUNSHINE_CONF="$HOME/.config/sunshine/sunshine.conf"
+fi
 SETTINGS_FILE="$HOME/.config/dual-screen-mode/settings.conf"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}/dual-screen-mode"
 LOCK_FILE="$RUNTIME_DIR/toggle.lock"
@@ -39,6 +59,8 @@ MOTION_STATUS_FILE="$RUNTIME_DIR/motion-status"
 MOTION_PID_FILE="$RUNTIME_DIR/motion-monitor.pid"
 STATE_DIR="$HOME/.local/state/dual-screen-mode"
 OWNED_SUNSHINE_CONFIG_MARKER="$STATE_DIR/owned-sunshine-config"
+GNOME_VMON_HELPER="$HOME/.local/share/dual-screen-mode/gnome_vmon.py"
+VMON_CONNECTOR_FILE="$RUNTIME_DIR/vmonitor.connector"
 
 # Keep the toggle single-instance.  flock is preferred because the kernel
 # releases it after a crash; the directory fallback keeps the launcher usable
@@ -186,12 +208,37 @@ case "$AUDIO_MODE" in
     *) AUDIO_MODE="host" ;;
 esac
 
+gnome_virtual_connector() {
+    command -v python3 >/dev/null 2>&1 || return 1
+    [[ -f "$GNOME_VMON_HELPER" ]] || return 1
+    python3 "$GNOME_VMON_HELPER" virtual-connector --connector-file "$VMON_CONNECTOR_FILE" 2>/dev/null
+}
+
 virtual_display_exists() {
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        [[ -n "$(gnome_virtual_connector 2>/dev/null || true)" ]]
+        return
+    fi
     kscreen-doctor -j 2>/dev/null |
         grep -Fq "\"name\": \"Virtual-${VIRTUAL_NAME}\""
 }
 
 position_virtual_display() {
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        # GNOME places a new virtual monitor through Mutter's DisplayConfig
+        # API; center it below the main display like the KDE path does.
+        command -v python3 >/dev/null 2>&1 || return 0
+        local gnome_connector gnome_width gnome_height
+        gnome_connector="$(gnome_virtual_connector 2>/dev/null || true)"
+        [[ -n "$gnome_connector" ]] || return 0
+        gnome_width="${VIRTUAL_RESOLUTION%x*}"
+        gnome_height="${VIRTUAL_RESOLUTION#*x}"
+        python3 "$GNOME_VMON_HELPER" place \
+            --connector "$gnome_connector" \
+            --width "$gnome_width" \
+            --height "$gnome_height" >/dev/null 2>&1 || true
+        return 0
+    fi
     # KDE places a newly-created output wherever its current layout happens
     # to put it. Give the virtual screen a predictable starting position:
     # centered below the main physical display.
@@ -239,14 +286,44 @@ sunshine_flatpak_pid() {
         awk -v app="$SUNSHINE_APP" '$1 == app && $2 ~ /^[0-9]+$/ { print $2; exit }'
 }
 
+sunshine_native_pid() {
+    if [[ -f "$SUNSHINE_PID_FILE" ]]; then
+        local recorded
+        recorded="$(cat "$SUNSHINE_PID_FILE" 2>/dev/null || true)"
+        if sunshine_pid_is_ours "$recorded"; then
+            printf '%s\n' "$recorded"
+            return 0
+        fi
+    fi
+    pgrep -u "$(id -u)" -x sunshine 2>/dev/null | head -n 1
+}
+
+sunshine_native_running() {
+    local pid
+    pid="$(sunshine_native_pid || true)"
+    [[ "$pid" =~ ^[0-9]+$ ]]
+}
+
+sunshine_service_active() {
+    command -v systemctl >/dev/null 2>&1 || return 1
+    systemctl --user is-active --quiet sunshine.service 2>/dev/null && return 0
+    systemctl --user is-active --quiet sunshine 2>/dev/null && return 0
+    return 1
+}
+
 sunshine_running() {
-    if sunshine_flatpak_running; then
-        return 0
+    if [[ "$SUNSHINE_MODE" == "flatpak" ]]; then
+        if sunshine_flatpak_running; then
+            return 0
+        fi
+    else
+        if sunshine_native_running || sunshine_service_active; then
+            return 0
+        fi
     fi
 
-    # Some Flatpak versions do not report a system-installed app through the
-    # columns query even while it is running. Sunshine's HTTPS UI is a better
-    # readiness signal in that case.
+    # Sunshine's HTTPS UI is a better readiness signal than process tables
+    # when the process runs under a service manager or sandbox.
     if command -v ss >/dev/null 2>&1 &&
         run_bounded 3 ss -ltn 2>/dev/null | grep -Eq ':47990[[:space:]]'; then
         return 0
@@ -273,12 +350,17 @@ sunshine_pid_is_ours() {
         fi
     fi
 
-    tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
-        grep -Fq "$SUNSHINE_APP" && return 0
+    if [[ "$SUNSHINE_MODE" == "flatpak" ]]; then
+        tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
+            grep -Fq "$SUNSHINE_APP" && return 0
 
-    # Keep compatibility with an older DSM runtime file after Flatpak has
-    # replaced the command line. The app ID normally remains in its cgroup.
-    grep -Fq "$SUNSHINE_APP" "/proc/$pid/cgroup" 2>/dev/null
+        # Keep compatibility with an older DSM runtime file after Flatpak has
+        # replaced the command line. The app ID normally remains in its cgroup.
+        grep -Fq "$SUNSHINE_APP" "/proc/$pid/cgroup" 2>/dev/null
+    else
+        tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
+            grep -Eq '(^|/| )sunshine( |$)' && return 0
+    fi
 }
 
 record_sunshine_identity() {
@@ -286,20 +368,27 @@ record_sunshine_identity() {
     local pid="$launcher_pid"
     local detected_pid
     local instance
-    detected_pid="$(sunshine_flatpak_pid || true)"
-    if [[ "$detected_pid" =~ ^[0-9]+$ ]]; then
-        pid="$detected_pid"
+    if [[ "$SUNSHINE_MODE" == "flatpak" ]]; then
+        detected_pid="$(sunshine_flatpak_pid || true)"
+        if [[ "$detected_pid" =~ ^[0-9]+$ ]]; then
+            pid="$detected_pid"
+        fi
+        instance="$(sunshine_flatpak_instance || true)"
+        if [[ -n "$instance" ]]; then
+            printf '%s\n' "$instance" > "$SUNSHINE_INSTANCE_FILE"
+            chmod 600 "$SUNSHINE_INSTANCE_FILE"
+        else
+            rm -f "$SUNSHINE_INSTANCE_FILE"
+        fi
+    else
+        detected_pid="$(pgrep -u "$(id -u)" -x sunshine 2>/dev/null | head -n 1 || true)"
+        if [[ "$detected_pid" =~ ^[0-9]+$ ]]; then
+            pid="$detected_pid"
+        fi
+        rm -f "$SUNSHINE_INSTANCE_FILE"
     fi
     printf '%s\n' "$pid" > "$SUNSHINE_PID_FILE"
     chmod 600 "$SUNSHINE_PID_FILE"
-
-    instance="$(sunshine_flatpak_instance || true)"
-    if [[ -n "$instance" ]]; then
-        printf '%s\n' "$instance" > "$SUNSHINE_INSTANCE_FILE"
-        chmod 600 "$SUNSHINE_INSTANCE_FILE"
-    else
-        rm -f "$SUNSHINE_INSTANCE_FILE"
-    fi
 
     local start_time
     start_time="$(awk '{ print $22 }' "/proc/$pid/stat" 2>/dev/null || true)"
@@ -322,7 +411,7 @@ wait_for_process_exit() {
     return 1
 }
 
-stop_owned_sunshine() {
+stop_owned_sunshine_flatpak() {
     local should_stop=0
     local sunshine_target="$SUNSHINE_APP"
     local owned_pid=""
@@ -356,6 +445,34 @@ stop_owned_sunshine() {
         done
         sunshine_flatpak_running && result=1
     fi
+    return "$result"
+}
+
+stop_owned_sunshine_native() {
+    local result=0
+    if [[ -f "$SUNSHINE_OWNED_FILE" && -f "$SUNSHINE_PID_FILE" ]]; then
+        local owned_pid
+        owned_pid="$(cat "$SUNSHINE_PID_FILE" 2>/dev/null || true)"
+        if sunshine_pid_is_ours "$owned_pid"; then
+            terminate_process_tree "$owned_pid"
+            wait_for_process_exit "$owned_pid" || result=1
+        fi
+    fi
+    # A user systemd service is managed with systemctl, never killed by PID.
+    if [[ -f "$SUNSHINE_OWNED_FILE" ]] && sunshine_service_active; then
+        run_bounded 10 systemctl --user stop sunshine.service 2>/dev/null ||
+            run_bounded 10 systemctl --user stop sunshine 2>/dev/null || result=1
+    fi
+    return "$result"
+}
+
+stop_owned_sunshine() {
+    local result=0
+    if [[ "$SUNSHINE_MODE" == "flatpak" ]]; then
+        stop_owned_sunshine_flatpak || result=1
+    else
+        stop_owned_sunshine_native || result=1
+    fi
     rm -f "$SUNSHINE_PID_FILE" "$SUNSHINE_START_FILE" "$SUNSHINE_INSTANCE_FILE" "$SUNSHINE_OWNED_FILE"
     return "$result"
 }
@@ -373,7 +490,7 @@ wait_for_sunshine() {
     return 1
 }
 
-start_or_refresh_sunshine() {
+start_or_refresh_sunshine_flatpak() {
     # Sunshine reads output_name when it starts. Refresh an already-running
     # Flatpak instance so a previously loaded physical-display target cannot
     # survive into this mode. Do not touch an unrelated native/system
@@ -428,12 +545,51 @@ start_or_refresh_sunshine() {
     record_sunshine_identity "$launcher_pid"
 }
 
-restart_preexisting_sunshine() {
-    [[ "$(cat "$SUNSHINE_PREEXISTING_FILE" 2>/dev/null || true)" == "1" ]] || {
-        rm -f "$SUNSHINE_PREEXISTING_FILE"
+start_or_refresh_sunshine_native() {
+    if sunshine_service_active; then
+        printf '%s\n' 1 > "$SUNSHINE_PREEXISTING_FILE"
+        startup_timing "sunshine-restart"
+        if ! run_bounded 15 systemctl --user restart sunshine.service 2>/dev/null &&
+            ! run_bounded 15 systemctl --user restart sunshine 2>/dev/null; then
+            startup_fail "Sunshine could not be refreshed for the virtual display. Nothing was left running."
+        fi
+        wait_for_sunshine || startup_fail "Sunshine did not finish restarting. Nothing was left running."
         return 0
-    }
+    fi
+    if sunshine_running; then
+        startup_fail "Sunshine is already running outside Dual Screen Mode. Close that Sunshine instance, then try Dual Screen Mode again."
+    fi
+    if ! command -v sunshine >/dev/null 2>&1; then
+        startup_fail "Sunshine is not installed. Run Install Dual Screen Mode first."
+    fi
 
+    printf '%s\n' 0 > "$SUNSHINE_PREEXISTING_FILE"
+    startup_timing "sunshine-start"
+    nohup sunshine \
+        >"$RUNTIME_DIR/sunshine.log" 2>&1 9>&- &
+
+    local launcher_pid="$!"
+    printf '%s\n' "$launcher_pid" > "$SUNSHINE_PID_FILE"
+    chmod 600 "$SUNSHINE_PID_FILE"
+    touch "$SUNSHINE_OWNED_FILE"
+    if ! wait_for_sunshine; then
+        if startup_cancel_requested; then
+            startup_fail "Dual Screen Mode startup was cancelled. Your previous Sunshine session will be restored."
+        fi
+        startup_fail "Sunshine did not become ready. Nothing was left running."
+    fi
+    record_sunshine_identity "$launcher_pid"
+}
+
+start_or_refresh_sunshine() {
+    if [[ "$SUNSHINE_MODE" == "flatpak" ]]; then
+        start_or_refresh_sunshine_flatpak
+    else
+        start_or_refresh_sunshine_native
+    fi
+}
+
+restart_preexisting_sunshine_flatpak() {
     if ! sunshine_running; then
         nohup flatpak run "$SUNSHINE_APP" \
             >"$RUNTIME_DIR/sunshine.log" 2>&1 9>&- &
@@ -448,6 +604,46 @@ restart_preexisting_sunshine() {
         if (( ! restored )); then
             return 1
         fi
+    fi
+    return 0
+}
+
+restart_preexisting_sunshine_native() {
+    if ! sunshine_running; then
+        if systemctl --user list-unit-files 2>/dev/null | grep -Eq '^sunshine(\.service)?[[:space:]]'; then
+            run_bounded 15 systemctl --user start sunshine.service 2>/dev/null ||
+                run_bounded 15 systemctl --user start sunshine 2>/dev/null || return 1
+        elif command -v sunshine >/dev/null 2>&1; then
+            nohup sunshine \
+                >"$RUNTIME_DIR/sunshine.log" 2>&1 9>&- &
+        else
+            return 1
+        fi
+        local restored=0
+        for _ in {1..40}; do
+            if sunshine_running; then
+                restored=1
+                break
+            fi
+            sleep 0.5
+        done
+        if (( ! restored )); then
+            return 1
+        fi
+    fi
+    return 0
+}
+
+restart_preexisting_sunshine() {
+    [[ "$(cat "$SUNSHINE_PREEXISTING_FILE" 2>/dev/null || true)" == "1" ]] || {
+        rm -f "$SUNSHINE_PREEXISTING_FILE"
+        return 0
+    }
+
+    if [[ "$SUNSHINE_MODE" == "flatpak" ]]; then
+        restart_preexisting_sunshine_flatpak || return 1
+    else
+        restart_preexisting_sunshine_native || return 1
     fi
 
     rm -f "$SUNSHINE_PREEXISTING_FILE" "$SUNSHINE_PID_FILE" "$SUNSHINE_START_FILE" "$SUNSHINE_INSTANCE_FILE" "$SUNSHINE_OWNED_FILE"
@@ -511,7 +707,84 @@ touch_mapping_saved_for() {
         "$TOUCH_MAPPING_FILE"
 }
 
-map_sunshine_touch_devices() {
+gnome_touch_target_spec() {
+    local connector
+    connector="$(gnome_virtual_connector 2>/dev/null || true)"
+    [[ -n "$connector" ]] || return 1
+    python3 "$GNOME_VMON_HELPER" monitor-spec --connector "$connector" 2>/dev/null
+}
+
+gnome_touch_devices() {
+    command -v libinput >/dev/null 2>&1 || return 1
+    local name="" kernel="" line props vid pid
+    while IFS= read -r line; do
+        case "$line" in
+            "Device: "*) name="${line#Device: }"; kernel="" ;;
+            "Kernel: "*) kernel="${line#Kernel: }" ;;
+            "")
+                if [[ -n "$name" && -n "$kernel" ]] && touch_device_matches_sunshine "$name"; then
+                    props="$(udevadm info --query=property --name="$kernel" 2>/dev/null || true)"
+                    vid="$(printf '%s\n' "$props" | sed -n 's/^ID_VENDOR_ID=//p' | head -n 1)"
+                    pid="$(printf '%s\n' "$props" | sed -n 's/^ID_MODEL_ID=//p' | head -n 1)"
+                    if [[ "$vid" =~ ^[0-9a-fA-F]{4}$ && "$pid" =~ ^[0-9a-fA-F]{4}$ ]]; then
+                        printf '%s\t%s:%s\t%s\n' "$kernel" "${vid,,}" "${pid,,}" "$name"
+                    fi
+                fi
+                name="" kernel=""
+                ;;
+        esac
+    done < <(libinput list-devices 2>/dev/null; printf '\n')
+}
+
+map_sunshine_touch_devices_gnome() {
+    command -v gsettings >/dev/null 2>&1 || {
+        set_touch_status unavailable
+        return 2
+    }
+    local spec target
+    spec="$(gnome_touch_target_spec || true)"
+    [[ -n "$spec" ]] || {
+        set_touch_status unavailable
+        return 2
+    }
+    local spec_vendor spec_product spec_serial
+    IFS=$'\t' read -r spec_vendor spec_product spec_serial <<< "$spec"
+    target="['$spec_vendor', '$spec_product', '$spec_serial']"
+
+    local found=0
+    local failed=0
+    local kernel vidpid name path old_output
+    while IFS=$'\t' read -r kernel vidpid name; do
+        [[ -n "$kernel" ]] || continue
+        path="/org/gnome/desktop/peripherals/touchscreens/$vidpid/"
+        found=1
+        old_output="$(gsettings get org.gnome.desktop.peripherals.touchscreen:"$path" output 2>/dev/null || true)"
+        if [[ "$old_output" == "$target" ]]; then
+            continue
+        fi
+        if ! touch_mapping_saved_for "$path"; then
+            printf '%s\t%s\n' "$path" "${old_output:-__MISSING__}" >> "$TOUCH_MAPPING_FILE"
+        fi
+        if ! gsettings set org.gnome.desktop.peripherals.touchscreen:"$path" output "$target" 2>/dev/null; then
+            failed=1
+            continue
+        fi
+    done < <(gnome_touch_devices)
+
+    if (( failed )); then
+        set_touch_status warning
+        return 3
+    fi
+    if (( found )); then
+        set_touch_status mapped
+        return 0
+    fi
+
+    set_touch_status waiting
+    return 1
+}
+
+map_sunshine_touch_devices_kwin() {
     local target="Virtual-${VIRTUAL_NAME}"
     local devices
     devices="$(kwin_dbus \
@@ -560,6 +833,14 @@ map_sunshine_touch_devices() {
     return 1
 }
 
+map_sunshine_touch_devices() {
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        map_sunshine_touch_devices_gnome
+    else
+        map_sunshine_touch_devices_kwin
+    fi
+}
+
 touch_watcher_pid_is_ours() {
     local pid="$1"
     [[ "$pid" =~ ^[0-9]+$ ]] || return 1
@@ -569,11 +850,19 @@ touch_watcher_pid_is_ours() {
 }
 
 start_touch_watcher() {
-    command -v qdbus6 >/dev/null 2>&1 ||
-        command -v qdbus >/dev/null 2>&1 || {
-        set_touch_status unavailable
-        return 0
-    }
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        command -v gsettings >/dev/null 2>&1 ||
+            command -v python3 >/dev/null 2>&1 || {
+            set_touch_status unavailable
+            return 0
+        }
+    else
+        command -v qdbus6 >/dev/null 2>&1 ||
+            command -v qdbus >/dev/null 2>&1 || {
+            set_touch_status unavailable
+            return 0
+        }
+    fi
 
     (
         close_toggle_lock_for_child
@@ -804,17 +1093,37 @@ start_motion_monitor() {
     chmod 600 "$MOTION_PID_FILE"
 }
 
+restore_touch_mappings_kwin() {
+    local device old_output
+    while IFS=$'\t' read -r device old_output; do
+        [[ -n "$device" ]] || continue
+        kwin_set_input_property "$device" outputName "$old_output" || true
+    done < "$TOUCH_MAPPING_FILE"
+}
+
+restore_touch_mappings_gnome() {
+    local path old_output
+    while IFS=$'\t' read -r path old_output; do
+        [[ -n "$path" ]] || continue
+        if [[ -z "$old_output" || "$old_output" == "__MISSING__" ]]; then
+            gsettings reset org.gnome.desktop.peripherals.touchscreen:"$path" output 2>/dev/null || true
+        else
+            gsettings set org.gnome.desktop.peripherals.touchscreen:"$path" output "$old_output" 2>/dev/null || true
+        fi
+    done < "$TOUCH_MAPPING_FILE"
+}
+
 restore_touch_mappings() {
     [[ -f "$TOUCH_MAPPING_FILE" ]] || {
         rm -f "$TOUCH_STATUS_FILE"
         return 0
     }
 
-    local device old_output
-    while IFS=$'\t' read -r device old_output; do
-        [[ -n "$device" ]] || continue
-        kwin_set_input_property "$device" outputName "$old_output" || true
-    done < "$TOUCH_MAPPING_FILE"
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        restore_touch_mappings_gnome
+    else
+        restore_touch_mappings_kwin
+    fi
     rm -f "$TOUCH_MAPPING_FILE" "$TOUCH_STATUS_FILE"
 }
 
@@ -823,6 +1132,13 @@ vmonitor_pid_is_ours() {
     [[ "$pid" =~ ^[0-9]+$ ]] || return 1
     [[ -r "/proc/$pid/cmdline" ]] || return 1
     [[ -O "/proc/$pid" ]] || return 1
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
+            grep -Fq "gnome_vmon.py" || return 1
+        tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
+            grep -Fq -- "--runtime-dir $RUNTIME_DIR" || return 1
+        return 0
+    fi
     tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
         grep -Fq "krfb-virtualmonitor" || return 1
     tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
@@ -894,6 +1210,29 @@ restore_sunshine_session_config() {
 }
 
 ensure_sunshine_capture_config() {
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        # GNOME Wayland has no KWin capture; Sunshine uses the XDG portal.
+        # The virtual connector name is dynamic (Meta-N), so output_name is
+        # rewritten on every start while the original lines stay saved.
+        local gnome_connector
+        gnome_connector="$(gnome_virtual_connector 2>/dev/null || true)"
+        [[ -n "$gnome_connector" ]] || return 1
+        save_sunshine_session_config || return 1
+        if [[ ! -f "$OWNED_SUNSHINE_CONFIG_MARKER" ]]; then
+            local original_capture original_output
+            original_capture="$(get_config_line capture)"
+            original_output="$(get_config_line output_name)"
+            mkdir -p "$STATE_DIR" || return 1
+            printf '%s\n' \
+                "capture_line=${original_capture:-__MISSING__}" \
+                "output_name_line=${original_output:-__MISSING__}" > "$OWNED_SUNSHINE_CONFIG_MARKER" || return 1
+        fi
+        set_config_key capture portal
+        set_config_key output_name "$gnome_connector"
+        grep -Eq "^[[:space:]]*capture[[:space:]]*=[[:space:]]*portal[[:space:]]*$" "$SUNSHINE_CONF" 2>/dev/null
+        return
+    fi
+
     if grep -Eq "^[[:space:]]*capture[[:space:]]*=[[:space:]]*kwin[[:space:]]*$" "$SUNSHINE_CONF" 2>/dev/null &&
         grep -Eq "^[[:space:]]*output_name[[:space:]]*=[[:space:]]*Virtual-${VIRTUAL_NAME}[[:space:]]*$" "$SUNSHINE_CONF" 2>/dev/null; then
         return 0
@@ -1017,6 +1356,12 @@ stop_virtual_monitor() {
     # Fallback handles a monitor started by an older DSM copy before the PID
     # file was written, and also catches a launcher process that replaced the
     # recorded PID during exec.
+    local vmon_pattern
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        vmon_pattern='gnome_vmon\.py.*--runtime-dir'
+    else
+        vmon_pattern='(^|/)krfb-virtualmonitor([[:space:]]|$)'
+    fi
     while IFS= read -r pid; do
         if vmonitor_pid_is_ours "$pid"; then
             kill -CONT "$pid" 2>/dev/null || true
@@ -1026,7 +1371,10 @@ stop_virtual_monitor() {
                 sleep 0.1
             done
         fi
-    done < <(pgrep -u "$(id -u)" -f '(^|/)krfb-virtualmonitor([[:space:]]|$)' 2>/dev/null || true)
+    done < <(pgrep -u "$(id -u)" -f "$vmon_pattern" 2>/dev/null || true)
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        rm -f "$VMON_CONNECTOR_FILE"
+    fi
 }
 
 turn_off() {
@@ -1091,13 +1439,27 @@ if restore_sunshine_session_config; then
 fi
 rm -f "$VMON_PID_FILE"
 
-if ! command -v krfb-virtualmonitor >/dev/null 2>&1; then
-    notify_user "krfb-virtualmonitor is not installed. Run Install Dual Screen Mode first."
-    exit 1
+if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+    if ! command -v python3 >/dev/null 2>&1 || [[ ! -f "$GNOME_VMON_HELPER" ]]; then
+        notify_user "The GNOME virtual display helper is not installed. Run Install Dual Screen Mode first."
+        exit 1
+    fi
+else
+    if ! command -v krfb-virtualmonitor >/dev/null 2>&1; then
+        notify_user "krfb-virtualmonitor is not installed. Run Install Dual Screen Mode first."
+        exit 1
+    fi
 fi
-if ! command -v flatpak >/dev/null 2>&1; then
-    notify_user "Flatpak is not installed. Run Install Dual Screen Mode first."
-    exit 1
+if [[ "$SUNSHINE_MODE" == "flatpak" ]]; then
+    if ! command -v flatpak >/dev/null 2>&1; then
+        notify_user "Flatpak is not installed. Run Install Dual Screen Mode first."
+        exit 1
+    fi
+else
+    if ! command -v sunshine >/dev/null 2>&1; then
+        notify_user "Sunshine is not installed. Run Install Dual Screen Mode first."
+        exit 1
+    fi
 fi
 
 # If setup is interrupted before the active marker is written, restore the
@@ -1165,24 +1527,37 @@ startup_timing "display-start"
 
 # Start the virtual display if it is not already present.
 if ! virtual_display_exists; then
-    if ! command -v base64 >/dev/null 2>&1; then
-        startup_fail "A secure temporary display password could not be generated. Nothing was started."
+    vmon_wait_attempts=30
+    if [[ "$DSM_DESKTOP" == "gnome" ]]; then
+        gnome_width="${VIRTUAL_RESOLUTION%x*}"
+        gnome_height="${VIRTUAL_RESOLUTION#*x}"
+        nohup python3 "$GNOME_VMON_HELPER" run \
+            --width "$gnome_width" \
+            --height "$gnome_height" \
+            --runtime-dir "$RUNTIME_DIR" \
+            --connector-file "$VMON_CONNECTOR_FILE" \
+            >>"$RUNTIME_DIR/vmonitor.log" 2>&1 9>&- &
+        vmon_wait_attempts=120
+    else
+        if ! command -v base64 >/dev/null 2>&1; then
+            startup_fail "A secure temporary display password could not be generated. Nothing was started."
+        fi
+        VMON_PASSWORD="$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 8)"
+        if [[ ! "$VMON_PASSWORD" =~ ^[[:alnum:]]{8}$ ]]; then
+            startup_fail "A secure temporary display password could not be generated. Nothing was started."
+        fi
+        nohup krfb-virtualmonitor \
+            --name "$VIRTUAL_NAME" \
+            --resolution "$VIRTUAL_RESOLUTION" \
+            --password "$VMON_PASSWORD" \
+            --port 5900 \
+            >"$RUNTIME_DIR/vmonitor.log" 2>&1 9>&- &
     fi
-    VMON_PASSWORD="$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 8)"
-    if [[ ! "$VMON_PASSWORD" =~ ^[[:alnum:]]{8}$ ]]; then
-        startup_fail "A secure temporary display password could not be generated. Nothing was started."
-    fi
-    nohup krfb-virtualmonitor \
-        --name "$VIRTUAL_NAME" \
-        --resolution "$VIRTUAL_RESOLUTION" \
-        --password "$VMON_PASSWORD" \
-        --port 5900 \
-        >"$RUNTIME_DIR/vmonitor.log" 2>&1 9>&- &
 
     echo "$!" > "$VMON_PID_FILE"
     virtual_display_created=1
 
-    for _ in {1..30}; do
+    for _ in $(seq 1 "$vmon_wait_attempts"); do
         if virtual_display_exists; then
             break
         fi
