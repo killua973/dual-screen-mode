@@ -224,8 +224,8 @@ run_as_root() {
 
 ui_message() {
     local message="$1"
-    if (( GUI_EXECUTE )); then
-        note "$message"
+    if (( GUI_EXECUTE || CHECK_ONLY || DRY_RUN )); then
+        printf '\n%b\n\n' "$message"
         return 0
     fi
     if have kdialog; then

@@ -11,9 +11,14 @@ exits, Mutter removes the monitor and falls back to the saved layout.
 It also reads and applies the display layout through Mutter's DisplayConfig
 API so the virtual monitor can be placed centered below the main display.
 
+The D-Bus replies are parsed defensively: different GNOME versions render
+slightly different struct shapes, so field access goes through helpers that
+tolerate short or differently nested entries instead of crashing.
+
 Subcommands:
   run --width W --height H --runtime-dir DIR --connector-file FILE
-  status
+  status            (prints parsed JSON; adds "raw" when the shape is unknown)
+  raw               (prints the raw busctl reply, for debugging)
   virtual-connector --connector-file FILE
   monitor-spec --connector CONNECTOR
   place --connector CONNECTOR --width W --height H
@@ -70,75 +75,137 @@ def busctl_call(destination, path, interface, method, signature="", args=()):
     return result.stdout.strip()
 
 
+def fields(entry):
+    """Return a struct entry as a list, tolerating unexpected shapes."""
+    if isinstance(entry, list):
+        return entry
+    if isinstance(entry, tuple):
+        return list(entry)
+    return []
+
+
 def get_state():
     data = busctl_call_json(
         DISPLAYCONFIG_NAME, DISPLAYCONFIG_PATH,
         DISPLAYCONFIG_NAME, "GetCurrentState",
     )
-    if not isinstance(data, list) or len(data) < 4:
-        raise RuntimeError("unexpected GetCurrentState reply")
-    serial, monitors, logical_monitors, _properties = data
+    if not isinstance(data, list) or len(data) < 3:
+        raise RuntimeError("unexpected GetCurrentState reply: %r" % (data,))
+    monitors = data[1] if isinstance(data[1], list) else []
+    logical_monitors = data[2] if isinstance(data[2], list) else []
     return {
-        "serial": serial,
+        "serial": data[0],
         "monitors": monitors,
         "logical_monitors": logical_monitors,
+        "raw": data,
     }
+
+
+def connector_of(entry):
+    entry_fields = fields(entry)
+    if entry_fields and isinstance(entry_fields[0], str):
+        return entry_fields[0]
+    return None
 
 
 def monitor_entry(state, connector):
     for entry in state["monitors"]:
-        if entry[0] == connector:
-            return entry
+        if connector_of(entry) == connector:
+            return fields(entry)
     return None
+
+
+def mode_fields(mode):
+    return fields(mode)
+
+
+def current_mode(state, connector):
+    entry = monitor_entry(state, connector)
+    if not entry or len(entry) < 5 or not isinstance(entry[4], list):
+        return None
+    modes = entry[4]
+    current = None
+    preferred = None
+    first = None
+    for mode in modes:
+        mode_f = mode_fields(mode)
+        if len(mode_f) < 4:
+            continue
+        if first is None:
+            first = mode_f
+        props = mode_f[6] if len(mode_f) > 6 and isinstance(mode_f[6], dict) else {}
+        if props.get("is-current"):
+            current = mode_f
+        if props.get("is-preferred") and preferred is None:
+            preferred = mode_f
+    chosen = current or preferred or first
+    if not chosen:
+        return None
+    return {
+        "id": chosen[0],
+        "width": int(chosen[1]),
+        "height": int(chosen[2]),
+    }
 
 
 def current_mode_id(state, connector):
-    entry = monitor_entry(state, connector)
-    if not entry:
-        return None
-    modes = entry[4] or []
-    for mode in modes:
-        props = mode[6] or {}
-        if props.get("is-current"):
-            return mode[0]
-    for mode in modes:
-        props = mode[6] or {}
-        if props.get("is-preferred"):
-            return mode[0]
-    if modes:
-        return modes[0][0]
-    return None
+    mode = current_mode(state, connector)
+    return mode["id"] if mode else None
 
 
 def mode_size(state, connector):
-    entry = monitor_entry(state, connector)
-    if not entry:
+    mode = current_mode(state, connector)
+    if not mode:
         return None
-    modes = entry[4] or []
-    current = None
-    for mode in modes:
-        props = mode[6] or {}
-        if props.get("is-current"):
-            current = mode
-            break
-    if current is None and modes:
-        current = modes[0]
-    if current is None:
-        return None
-    return int(current[1]), int(current[2])
+    return mode["width"], mode["height"]
+
+
+def _scan_strings(obj, out):
+    if isinstance(obj, str):
+        out.append(obj)
+    elif isinstance(obj, (list, tuple)):
+        for item in obj:
+            _scan_strings(item, out)
+    elif isinstance(obj, dict):
+        for item in obj.values():
+            _scan_strings(item, out)
 
 
 def virtual_connectors(state):
-    return [entry[0] for entry in state["monitors"] if str(entry[0]).startswith(VIRTUAL_PREFIX)]
+    found = []
+    for entry in state["monitors"]:
+        connector = connector_of(entry)
+        if connector and connector.startswith(VIRTUAL_PREFIX) and connector not in found:
+            found.append(connector)
+    if not found:
+        # Shape fallback: scan the whole reply for virtual connector names.
+        strings = []
+        _scan_strings(state["raw"], strings)
+        for item in strings:
+            if item.startswith(VIRTUAL_PREFIX) and item not in found:
+                found.append(item)
+    return found
+
+
+def logical_fields(logical):
+    return fields(logical)
 
 
 def logical_size(state, logical):
-    _x, _y, scale, _transform, _primary, monitors, _props = logical
-    if not scale or scale <= 0:
+    logical_f = logical_fields(logical)
+    if len(logical_f) < 6:
+        return None
+    scale = logical_f[2]
+    if not isinstance(scale, (int, float)) or scale <= 0:
         scale = 1.0
     width = height = 0
+    monitors = logical_f[5] if isinstance(logical_f[5], list) else []
     for spec in monitors:
-        size = mode_size(state, spec[0])
+        spec_f = fields(spec)
+        connector = spec_f[0] if spec_f and isinstance(spec_f[0], str) else (spec if isinstance(spec, str) else None)
+        if not connector:
+            continue
+        size = mode_size(state, connector)
         if size:
             width = max(width, size[0])
             height = max(height, size[1])
@@ -149,14 +216,21 @@ def logical_size(state, logical):
 
 def find_virtual_logical(state, connector):
     for logical in state["logical_monitors"]:
-        for spec in logical[5]:
-            if spec[0] == connector:
-                return logical
+        logical_f = logical_fields(logical)
+        if len(logical_f) < 6:
+            continue
+        monitors = logical_f[5] if isinstance(logical_f[5], list) else []
+        for spec in monitors:
+            spec_f = fields(spec)
+            spec_connector = spec_f[0] if spec_f and isinstance(spec_f[0], str) else (spec if isinstance(spec, str) else None)
+            if spec_connector == connector:
+                return logical_f
     return None
 
 
 def find_main_logical(state):
-    logicals = state["logical_monitors"]
+    logicals = [logical_fields(item) for item in state["logical_monitors"]]
+    logicals = [item for item in logicals if len(item) >= 6]
     if not logicals:
         return None
     for logical in logicals:
@@ -165,7 +239,10 @@ def find_main_logical(state):
     for logical in logicals:
         if logical[0] == 0 and logical[1] == 0:
             return logical
-    return max(logicals, key=lambda item: (logical_size(state, item) or (0, 0))[0] * (logical_size(state, item) or (0, 0))[1])
+    def area(logical):
+        size = logical_size(state, logical)
+        return (size[0] * size[1]) if size else 0
+    return max(logicals, key=area)
 
 
 def gvariant_monitors_config(state, override):
@@ -175,18 +252,27 @@ def gvariant_monitors_config(state, override):
     """
     parts = []
     for logical in state["logical_monitors"]:
-        x, y, scale, transform, primary, monitors, _props = logical
-        if not scale or scale <= 0:
+        logical_f = logical_fields(logical)
+        if len(logical_f) < 6:
+            continue
+        x, y, scale, transform, primary = logical_f[0], logical_f[1], logical_f[2], logical_f[3], logical_f[4]
+        if not isinstance(scale, (int, float)) or scale <= 0:
             scale = 1.0
+        monitors = logical_f[5] if isinstance(logical_f[5], list) else []
         specs = []
         for spec in monitors:
-            connector = spec[0]
+            spec_f = fields(spec)
+            connector = spec_f[0] if spec_f and isinstance(spec_f[0], str) else (spec if isinstance(spec, str) else None)
+            if not connector:
+                continue
             mode_id = current_mode_id(state, connector)
             if not mode_id:
                 continue
             if connector in override:
                 x, y = override[connector]
             specs.append("('%s', '%s', [])" % (connector, mode_id))
+        if not specs:
+            continue
         parts.append("(%d, %d, %s, %d, %s, [%s])" % (
             int(x), int(y), repr(float(scale)), int(transform), "true" if primary else "false",
             ", ".join(specs),
@@ -210,6 +296,8 @@ def place_virtual(state, connector, width, height):
     target_x = main_x + max(0, (main_size[0] - virt_size[0]) // 2)
     target_y = main_y + main_size[1]
     config = gvariant_monitors_config(state, {connector: (target_x, target_y)})
+    if not config or config == "[]":
+        return False
     busctl_call(
         DISPLAYCONFIG_NAME, DISPLAYCONFIG_PATH, DISPLAYCONFIG_NAME,
         "ApplyMonitorsConfig", "uua(iiduba(ssa{sv}))a{sv}",
@@ -222,15 +310,26 @@ def cmd_status(_args):
     state = get_state()
     monitors = []
     for entry in state["monitors"]:
-        connector, vendor, product, serial = entry[0], entry[1], entry[2], entry[3]
+        entry_f = fields(entry)
+        connector = connector_of(entry)
+        if connector is None:
+            monitors.append({"raw": entry})
+            continue
+        vendor = entry_f[1] if len(entry_f) > 1 else ""
+        product = entry_f[2] if len(entry_f) > 2 else ""
+        serial = entry_f[3] if len(entry_f) > 3 else ""
         modes = []
-        for mode in entry[4] or []:
-            props = mode[6] or {}
+        raw_modes = entry_f[4] if len(entry_f) > 4 and isinstance(entry_f[4], list) else []
+        for mode in raw_modes:
+            mode_f = mode_fields(mode)
+            if len(mode_f) < 4:
+                continue
+            props = mode_f[6] if len(mode_f) > 6 and isinstance(mode_f[6], dict) else {}
             modes.append({
-                "id": mode[0],
-                "width": mode[1],
-                "height": mode[2],
-                "refresh_rate": mode[3],
+                "id": mode_f[0],
+                "width": mode_f[1],
+                "height": mode_f[2],
+                "refresh_rate": mode_f[3],
                 "is_current": bool(props.get("is-current")),
                 "is_preferred": bool(props.get("is-preferred")),
             })
@@ -243,19 +342,40 @@ def cmd_status(_args):
         })
     logicals = []
     for logical in state["logical_monitors"]:
+        logical_f = logical_fields(logical)
+        if len(logical_f) < 6:
+            logicals.append({"raw": logical})
+            continue
+        monitors_list = logical_f[5] if isinstance(logical_f[5], list) else []
+        connectors = []
+        for spec in monitors_list:
+            spec_f = fields(spec)
+            connectors.append(spec_f[0] if spec_f and isinstance(spec_f[0], str) else (spec if isinstance(spec, str) else ""))
         logicals.append({
-            "x": logical[0],
-            "y": logical[1],
-            "scale": logical[2],
-            "transform": logical[3],
-            "primary": bool(logical[4]),
-            "monitors": [spec[0] for spec in logical[5]],
+            "x": logical_f[0],
+            "y": logical_f[1],
+            "scale": logical_f[2],
+            "transform": logical_f[3],
+            "primary": bool(logical_f[4]),
+            "monitors": connectors,
         })
-    print(json.dumps({
+    output = {
         "serial": state["serial"],
         "monitors": monitors,
         "logical_monitors": logicals,
-    }))
+    }
+    if any("raw" in item for item in monitors) or any("raw" in item for item in logicals):
+        output["raw"] = state["raw"]
+    print(json.dumps(output))
+    return 0
+
+
+def cmd_raw(_args):
+    data = busctl_call_json(
+        DISPLAYCONFIG_NAME, DISPLAYCONFIG_PATH,
+        DISPLAYCONFIG_NAME, "GetCurrentState",
+    )
+    print(json.dumps(data))
     return 0
 
 
@@ -272,12 +392,8 @@ def cmd_virtual_connector(args):
     if saved and saved in virtuals:
         print(saved)
         return 0
-    if len(virtuals) == 1:
-        print(virtuals[0])
-        return 0
     if virtuals:
         print(virtuals[0])
-        return 0
     return 0
 
 
@@ -285,9 +401,17 @@ def cmd_monitor_spec(args):
     connector = args[args.index("--connector") + 1]
     state = get_state()
     entry = monitor_entry(state, connector)
-    if not entry:
-        return 1
-    print("%s\t%s\t%s" % (entry[1], entry[2], entry[3]))
+    if entry is None:
+        # Shape fallback: look for the connector anywhere in the raw reply.
+        strings = []
+        _scan_strings(state["raw"], strings)
+        if connector not in strings:
+            return 1
+        entry = []
+    vendor = entry[1] if len(entry) > 1 and isinstance(entry[1], str) else "Meta"
+    product = entry[2] if len(entry) > 2 and isinstance(entry[2], str) else "Virtual Monitor"
+    serial = entry[3] if len(entry) > 3 and isinstance(entry[3], str) else "0x00000000"
+    print("%s\t%s\t%s" % (vendor, product, serial))
     return 0
 
 
@@ -383,7 +507,7 @@ def cmd_run(args):
 
     try:
         place_virtual(get_state(), connector, width, height)
-    except RuntimeError as error:
+    except (RuntimeError, ValueError, IndexError, TypeError) as error:
         print("virtual monitor created, but placement failed: %s" % error, file=sys.stderr)
 
     exit_code = 0
@@ -425,6 +549,8 @@ def main():
             return cmd_run(args)
         if command == "status":
             return cmd_status(args)
+        if command == "raw":
+            return cmd_raw(args)
         if command == "virtual-connector":
             return cmd_virtual_connector(args)
         if command == "monitor-spec":
