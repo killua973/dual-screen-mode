@@ -34,9 +34,9 @@ case "$iface.$method" in
     org.gnome.Mutter.DisplayConfig.GetCurrentState)
         if [[ $json == 1 ]]; then
             if [[ -f "$FAKE_STATE/vmon-created" ]]; then
-                printf '%s\n' '{"type":"x","data":[7,[["eDP-1","BOE","0x0a1b","0x00000000",[["1920x1080@60.000",1920,1080,60.0,1.0,[1.0],{"is-current":true,"is-preferred":true}]],{}],["Meta-0","Meta","Virtual Monitor","0x00000000",[["1280x800@60.000",1280,800,60.0,1.0,[1.0],{"is-current":true,"is-preferred":true}]],{}]],[[0,0,1.0,0,true,[["eDP-1","BOE","0x0a1b","0x00000000"]],{}],[1920,1080,1.0,0,false,[["Meta-0","Meta","Virtual Monitor","0x00000000"]],{}]],{}]}'
+                printf '%s\n' '{"type":"x","data":[7,[[["eDP-1","BOE","0x0a1b","0x00000000"],[["1920x1080@60.000",1920,1080,60.0,1.0,[1.0],{"is-current":true,"is-preferred":true}]],{}],[["Meta-0","Meta","Virtual Monitor","0x00000000"],[["1280x800@60.000",1280,800,60.0,1.0,[1.0],{"is-current":true,"is-preferred":true}]],{}]],[[0,0,1.0,0,true,[["eDP-1","BOE","0x0a1b","0x00000000"]],{}],[1920,1080,1.0,0,false,[["Meta-0","Meta","Virtual Monitor","0x00000000"]],{}]],{}]}'
             else
-                printf '%s\n' '{"type":"x","data":[7,[["eDP-1","BOE","0x0a1b","0x00000000",[["1920x1080@60.000",1920,1080,60.0,1.0,[1.0],{"is-current":true,"is-preferred":true}]],{}]],[[0,0,1.0,0,true,[["eDP-1","BOE","0x0a1b","0x00000000"]],{}]],{}]}'
+                printf '%s\n' '{"type":"x","data":[7,[[["eDP-1","BOE","0x0a1b","0x00000000"],[["1920x1080@60.000",1920,1080,60.0,1.0,[1.0],{"is-current":true,"is-preferred":true}]],{}]],[[0,0,1.0,0,true,[["eDP-1","BOE","0x0a1b","0x00000000"]],{}]],{}]}'
             fi
         fi
         ;;

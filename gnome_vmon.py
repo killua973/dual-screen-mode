@@ -101,10 +101,30 @@ def get_state():
     }
 
 
+def monitor_parts(entry):
+    """Split a monitor entry into (spec, modes, props).
+
+    Current mutter nests the spec: ((ssss) modes props). Tolerate the flat
+    (ssss modes props) layout as well.
+    """
+    entry_f = fields(entry)
+    if not entry_f:
+        return [], [], {}
+    if isinstance(entry_f[0], list):
+        spec = entry_f[0]
+        modes = entry_f[1] if len(entry_f) > 1 and isinstance(entry_f[1], list) else []
+        props = entry_f[2] if len(entry_f) > 2 and isinstance(entry_f[2], dict) else {}
+        return spec, modes, props
+    spec = entry_f[:4]
+    modes = entry_f[4] if len(entry_f) > 4 and isinstance(entry_f[4], list) else []
+    props = entry_f[5] if len(entry_f) > 5 and isinstance(entry_f[5], dict) else {}
+    return spec, modes, props
+
+
 def connector_of(entry):
-    entry_fields = fields(entry)
-    if entry_fields and isinstance(entry_fields[0], str):
-        return entry_fields[0]
+    spec, _modes, _props = monitor_parts(entry)
+    if spec and isinstance(spec[0], str):
+        return spec[0]
     return None
 
 
@@ -121,9 +141,9 @@ def mode_fields(mode):
 
 def current_mode(state, connector):
     entry = monitor_entry(state, connector)
-    if not entry or len(entry) < 5 or not isinstance(entry[4], list):
+    if entry is None:
         return None
-    modes = entry[4]
+    _spec, modes, _props = monitor_parts(entry)
     current = None
     preferred = None
     first = None
@@ -323,16 +343,15 @@ def cmd_status(_args):
     state = get_state()
     monitors = []
     for entry in state["monitors"]:
-        entry_f = fields(entry)
         connector = connector_of(entry)
         if connector is None:
             monitors.append({"raw": entry})
             continue
-        vendor = entry_f[1] if len(entry_f) > 1 else ""
-        product = entry_f[2] if len(entry_f) > 2 else ""
-        serial = entry_f[3] if len(entry_f) > 3 else ""
+        spec, raw_modes, _props = monitor_parts(entry)
+        vendor = spec[1] if len(spec) > 1 else ""
+        product = spec[2] if len(spec) > 2 else ""
+        serial = spec[3] if len(spec) > 3 else ""
         modes = []
-        raw_modes = entry_f[4] if len(entry_f) > 4 and isinstance(entry_f[4], list) else []
         for mode in raw_modes:
             mode_f = mode_fields(mode)
             if len(mode_f) < 4:
@@ -423,10 +442,12 @@ def cmd_monitor_spec(args):
         _scan_strings(state["raw"], strings)
         if connector not in strings:
             return 1
-        entry = []
-    vendor = entry[1] if len(entry) > 1 and isinstance(entry[1], str) else "Meta"
-    product = entry[2] if len(entry) > 2 and isinstance(entry[2], str) else "Virtual Monitor"
-    serial = entry[3] if len(entry) > 3 and isinstance(entry[3], str) else "0x00000000"
+        spec = []
+    else:
+        spec, _modes, _props = monitor_parts(entry)
+    vendor = spec[1] if len(spec) > 1 and isinstance(spec[1], str) else "Meta"
+    product = spec[2] if len(spec) > 2 and isinstance(spec[2], str) else "Virtual Monitor"
+    serial = spec[3] if len(spec) > 3 and isinstance(spec[3], str) else "0x00000000"
     print("%s\t%s\t%s" % (vendor, product, serial))
     return 0
 
@@ -469,12 +490,12 @@ def cmd_run(args):
         return 4
 
     session_path = busctl_call_json(
-        SCREENCAST_NAME, SCREENCAST_PATH, SCREENCAST_NAME, "CreateSession", "a{sv}", ["{}"],
+        SCREENCAST_NAME, SCREENCAST_PATH, SCREENCAST_NAME, "CreateSession", "a{sv}", ["[]"],
     )
     if not session_path:
         raise RuntimeError("Mutter did not return a ScreenCast session")
     stream_path = busctl_call_json(
-        SCREENCAST_NAME, session_path, SESSION_IFACE, "RecordVirtual", "a{sv}", ["{}"],
+        SCREENCAST_NAME, session_path, SESSION_IFACE, "RecordVirtual", "a{sv}", ["[]"],
     )
     if not stream_path:
         raise RuntimeError("Mutter did not return a virtual stream")
